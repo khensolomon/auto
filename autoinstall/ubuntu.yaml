@@ -1,0 +1,80 @@
+#cloud-config
+autoinstall:
+  version: 1
+  refresh-installer:
+    update: no
+
+  locale: en_US.UTF-8
+
+  keyboard:
+    layout: "no"
+    variant: ""
+
+  identity:
+    hostname: ubuntu-mini
+    username: khensolomon
+    realname: "Khen Solomon"
+    # Password: abc
+    password: "$6$oR4/ufuAw.Kwb885$Q0a8TIFeHxhUP5nZ2/6E/8aXBAMiLErpGbm91yYLTrV6Yz.q8R.Qyz8937qFUxzf4eemWlQ9Yt7j7rAhSAb6P1"
+
+  storage:
+    layout:
+      name: direct
+    # swap:
+    #   size: 4G
+
+  apt:
+    primary:
+      - arches: [default]
+        uri: http://archive.ubuntu.com/ubuntu
+
+  packages:
+    - network-manager
+    - remmina
+    - inkscape
+    - gimp
+    - audacity
+    - sqlitebrowser
+    - curl
+    - wget
+    - gpg
+    - python-is-python3
+    - openssh-server
+
+  snaps:
+    - name: code
+      classic: true
+    - name: dbeaver-ce
+    - name: docker
+
+  late-commands:
+    # Update once before installing anything
+    - curtin in-target -- apt-get update
+    # Automatically detect and install proprietary WiFi and GPU drivers
+    - curtin in-target -- ubuntu-drivers install
+
+    # 1. Install Chrome
+    - curtin in-target -- wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+    - curtin in-target -- apt-get install -y /tmp/chrome.deb
+
+    # 2. Change Ubuntu Dock Settings (Panel mode, move to bottom)
+    # We use a glib-schema override so it applies to all users by default
+    - curtin in-target -- bash -c "echo -e '[org.gnome.shell.extensions.dash-to-dock]\nextend-height=true\ndock-position=\x27BOTTOM\x27' > /usr/share/glib-2.0/schemas/99-ubuntu-custom-dock.gschema.override"
+    - curtin in-target -- glib-compile-schemas /usr/share/glib-2.0/schemas/
+
+    # 3. Add a Startup Application (Example: Autostart Remmina)
+    # We place a .desktop file in the system-wide autostart directory
+    - curtin in-target -- bash -c "echo -e '[Desktop Entry]\nType=Application\nExec=remmina\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\nName=Start Remmina' > /etc/xdg/autostart/custom-remmina.desktop"
+
+    # 4. Install custom GNOME extension as the user 'khensolomon'
+    # - curtin in-target -- su - khensolomon -c "curl -sL https://raw.githubusercontent.com/khensolomon/lesion/master/install.py | python3 -"
+
+    # 5. Add VS Code to startup
+    - curtin in-target -- bash -c "echo -e '[Desktop Entry]\nType=Application\nExec=code\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\nName=VS Code' > /etc/xdg/autostart/custom-vscode.desktop"
+
+    # 6. Add SSH Agent to startup
+    - curtin in-target -- bash -c "echo -e '[Desktop Entry]\nType=Application\nExec=ssh-agent\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\nName=SSH Agent' > /etc/xdg/autostart/custom-ssh-agent.desktop"
+
+  # Nested cloud-init configuration
+  user-data:
+    package_upgrade: false
