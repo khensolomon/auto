@@ -162,8 +162,11 @@ if [ "$UPDATE_PASS" = true ]; then
     sed -i "s#password: .*#password: \"$PASSWORD_HASH\"#" "$TEMP_USERDATA"
 fi
 
-sed -i "s/usermod -aG libvirt $YAML_USER/usermod -aG libvirt $NEW_USER/" "$TEMP_USERDATA"
-sed -i "s/usermod -aG kvm $YAML_USER/usermod -aG kvm $NEW_USER/" "$TEMP_USERDATA"
+# Smart replace for the username in shell commands (e.g., 'su - username -c', 'usermod ... username')
+# Using [[:space:]] boundaries ensures we don't accidentally modify URLs or file paths.
+sed -E -i "s/([[:space:]])$YAML_USER([[:space:]]|$)/\1$NEW_USER\2/g" "$TEMP_USERDATA"
+# Run a second time to catch any adjacent overlapping space-separated matches
+sed -E -i "s/([[:space:]])$YAML_USER([[:space:]]|$)/\1$NEW_USER\2/g" "$TEMP_USERDATA"
 
 mv "$TEMP_USERDATA" "$WORK_DIR/extract/nocloud/user-data"
 
@@ -180,6 +183,9 @@ GRUB_CFG="$WORK_DIR/extract/boot/grub/grub.cfg"
 info "Injecting Autoinstall entry into GRUB..."
 
 if [ -f "$GRUB_CFG" ]; then
+    # Ensure we have write permissions (extracted ISO files are read-only 0444 by default)
+    chmod u+w "$GRUB_CFG"
+    
     # We use a temporary file to construct the new GRUB config
     TEMP_GRUB=$(mktemp)
     
@@ -193,7 +199,11 @@ if [ -f "$GRUB_CFG" ]; then
 
     # Insert the entry before the first 'menuentry' found in the original file
     awk -v entry="$AUTOINSTALL_ENTRY" '/menuentry/ && !done { print entry; done=1 } 1' "$GRUB_CFG" > "$TEMP_GRUB"
-    mv "$TEMP_GRUB" "$GRUB_CFG"
+    
+    # Overwrite contents in-place instead of using 'mv', to bypass read-only directory permissions
+    cat "$TEMP_GRUB" > "$GRUB_CFG"
+    rm -f "$TEMP_GRUB"
+    
     info "GRUB entry added successfully."
 else
     warn "grub.cfg not found at $GRUB_CFG. Skipping bootloader modification."

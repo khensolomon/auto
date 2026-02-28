@@ -57,9 +57,9 @@ autoinstall:
     - curtin in-target -- wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
     - curtin in-target -- apt-get install -y /tmp/chrome.deb
 
-    # 2. Change Ubuntu Dock Settings (Panel mode, move to bottom)
-    # We use a glib-schema override so it applies to all users by default
-    - curtin in-target -- bash -c "echo -e '[org.gnome.shell.extensions.dash-to-dock]\nextend-height=true\ndock-position=\x27BOTTOM\x27' > /usr/share/glib-2.0/schemas/99-ubuntu-custom-dock.gschema.override"
+    # 2. Disable Ubuntu Dock Panel Mode (make it a floating dock)
+    # Using a glib-schema override is the most reliable method during installation since 'gsettings' requires an active DBus session.
+    - curtin in-target -- bash -c "echo -e '[org.gnome.shell.extensions.dash-to-dock]\nextend-height=false' > /usr/share/glib-2.0/schemas/99-ubuntu-custom-dock.gschema.override"
     - curtin in-target -- glib-compile-schemas /usr/share/glib-2.0/schemas/
 
     # 3. Add a Startup Application (Example: Autostart Remmina)
@@ -67,7 +67,8 @@ autoinstall:
     - curtin in-target -- bash -c "echo -e '[Desktop Entry]\nType=Application\nExec=remmina\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\nName=Start Remmina' > /etc/xdg/autostart/custom-remmina.desktop"
 
     # 4. Install custom GNOME extension as the user 'khensolomon'
-    # - curtin in-target -- su - khensolomon -c "curl -sL https://raw.githubusercontent.com/khensolomon/lesion/master/install.py | python3 -"
+    # Wrapped in bash -c "... || true" so a failure does not abort the whole OS installation
+    - curtin in-target -- bash -c "su - khensolomon -c 'curl -sL https://raw.githubusercontent.com/khensolomon/lesion/master/install.py | python3 -' || true"
 
     # 5. Add VS Code to startup
     - curtin in-target -- bash -c "echo -e '[Desktop Entry]\nType=Application\nExec=code\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\nName=VS Code' > /etc/xdg/autostart/custom-vscode.desktop"

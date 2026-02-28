@@ -31,7 +31,7 @@ VS Code
 ## Password
 
 ```bash
-openssl passwd -6 "Password"
+openssl passwd -6 "abc"
 $6$mTP2GjN.z.TutOT4$Td1sJhOmqpzSX.0lDIZ1hNDcYVWE1Hcf.GX2oXLXsqFZkFI1obt0SEB8.s9OueeNGkSadAt2InCUvPiE7s0P8/
 ```
 
@@ -119,8 +119,6 @@ menuentry "Ubuntu Autoinstall (Wipes Disk)" {
         linux   /casper/vmlinuz  autoinstall ds=nocloud\;s=/cdrom/nocloud/ --- quiet splash
         initrd  /casper/initrd
 }
-
-
 ```
 
 Important:
