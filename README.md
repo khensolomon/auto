@@ -3,9 +3,10 @@
 ## Automate installation
 
 ```bash
-chmod +x autoinstall/build.sh
-autoinstall/build.sh
-./build.sh
+chmod +x autoinstall/ubuntu.sh
+chmod +x autoinstall/debian.sh
+autoinstall/ubuntu.sh
+./ubuntu.sh
 ```
 
 ... [Autoinstall][autoinstall]
