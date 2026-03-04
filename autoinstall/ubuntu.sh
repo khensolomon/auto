@@ -15,10 +15,13 @@ NC='\e[0m' # No Color
 info() { echo -e "${GREEN}${BOLD}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}${BOLD}[WARN]${NC} $1"; }
 error() { echo -e "${RED}${BOLD}[ERROR]${NC} $1"; exit 1; }
+
+blue() { echo -e "${BLUE}$1${NC}";}
+
 header() {
-    echo -e "${BLUE}========================================================${NC}"
+    blue "========================================================"
     echo -e "${BLUE}${BOLD}   $1${NC}"
-    echo -e "${BLUE}========================================================${NC}"
+    blue "========================================================"
 }
 
 # Determine the actual user and their home directory (even if running with sudo)
@@ -233,5 +236,5 @@ fi
 header "Success!"
 echo -e "1. Custom ISO:   ${GREEN}$OUT_ISO${NC}"
 echo -e "2. Workspace:    ${GREEN}$WORK_DIR${NC}"
-echo -e "--------------------------------------------------------"
+blue "--------------------------------------------------------"
 info "Process complete. You can now flash $OUT_ISO to a USB drive."

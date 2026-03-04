@@ -15,10 +15,12 @@ success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
+blue() { echo -e "${BLUE}$1${NC}";}
+
 header() {
-    echo -e "${BLUE}========================================================${NC}"
+    blue "========================================================"
     echo -e "${BLUE}${BOLD}   $1${NC}"
-    echo -e "${BLUE}========================================================${NC}"
+    blue "========================================================"
 }
 
 # Get the directory where this script is located
@@ -72,11 +74,11 @@ if ! basename "$ISO_PATH" | grep -qi "debian"; then
     error "The file '$ISO_PATH' does not appear to be a valid Debian ISO (filename must contain 'debian')."
 fi
 
-echo -e "${BLUE}-----------------------------------${NC}"
+blue "-----------------------------------"
 info "Using Base ISO: $ISO_PATH"
 info "Using YAML Config: $YAML_PATH"
 info "Using Work Dir: $WORK_DIR"
-echo -e "${BLUE}-----------------------------------${NC}"
+blue "-----------------------------------"
 
 # --- 4. Extract Defaults from YAML & Prompt for Inputs ---
 # Parse the yaml for hostname, username, and realname
@@ -204,6 +206,6 @@ fi
 # Execute xorriso with our constructed arguments
 xorriso "${XORRISO_ARGS[@]}" >/dev/null 2>&1
 
-echo -e "${BLUE}-----------------------------------${NC}"
+blue "-----------------------------------"
 success "Debian Autoinstall ISO created successfully!"
 info "Output: $TARGET_ISO"
