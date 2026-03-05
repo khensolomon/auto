@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
 
+"""
+Ubuntu Environment Interactive Setup Script
+
+Version: 1.0.0
+Date: 2026-03-04
+
+Description:
+    An interactive, data-driven script to configure a fresh Ubuntu environment.
+    Designed to be executed directly from a URL or run locally. Supports external 
+    JSON configuration injection via the '--tasks' argument.
+    
+Changelog:
+    - 1.0.0 (2026-03-04): Initial stable release featuring APT package installation, 
+                          URL script execution, autostart entries, GNOME dock configuration,
+                          smart JSON task merging, and action logging for easy rollbacks.
+"""
+
 import os
 import sys
 import subprocess
 import urllib.request
 import json
 import datetime
+import argparse
 
 # ==========================================
 # 0. TERMINAL FIX FOR PIPED EXECUTION
@@ -357,16 +375,57 @@ TASK_HANDLERS = {
 
 
 # ==========================================
-# 5. MAIN ENGINE
+# 5. MAIN ENGINE & MERGE LOGIC
 # ==========================================
+def merge_tasks(default_tasks, custom_tasks):
+    """Merges custom tasks into defaults. Overrides by 'name', or appends if new."""
+    merged = []
+    # Create a dictionary of custom tasks keyed by their name for easy lookup
+    custom_dict = {t['name']: t for t in custom_tasks if 'name' in t}
+    
+    # 1. Update existing default tasks or keep them
+    for task in default_tasks:
+        if task['name'] in custom_dict:
+            merged.append(custom_dict.pop(task['name'])) # Override with user custom task
+        else:
+            merged.append(task) # Keep default task
+            
+    # 2. Append any brand new custom tasks that weren't in the defaults
+    for task in custom_dict.values():
+        merged.append(task)
+        
+    return merged
+
 def main():
+    # --- Parse Command Line Arguments ---
+    parser = argparse.ArgumentParser(description="Ubuntu Environment Interactive Setup Script")
+    parser.add_argument('--tasks', type=str, help="Path to a custom JSON file to merge tasks.", default=None)
+    args = parser.parse_args()
+
+    # --- Determine Final Tasks List ---
+    final_tasks = SETUP_TASKS
+    if args.tasks:
+        if os.path.exists(args.tasks):
+            try:
+                with open(args.tasks, 'r') as f:
+                    user_tasks = json.load(f)
+                if isinstance(user_tasks, list):
+                    final_tasks = merge_tasks(SETUP_TASKS, user_tasks)
+                    print_success(f"Successfully loaded and merged custom tasks from {args.tasks}", indent=0)
+                else:
+                    print_error("Custom tasks file must contain a JSON list. Using defaults.", indent=0)
+            except json.JSONDecodeError as e:
+                print_error(f"Invalid JSON in {args.tasks}: {e}. Using defaults.", indent=0)
+        else:
+            print_error(f"Custom tasks file not found: {args.tasks}. Using defaults.", indent=0)
+
     print_header("Ubuntu Environment Interactive Setup Script")
-    print_info("Running configuration from source...\n", indent=0)
+    print_info("Running configuration...\n", indent=0)
 
     # --- Pre-flight Review ---
     print_step("Pre-flight Review")
     print_info("This script is configured to offer the following setup tasks:", indent=1)
-    for i, task in enumerate(SETUP_TASKS, 1):
+    for i, task in enumerate(final_tasks, 1):
         print_info(f"{i}. {task['name']}", indent=2)
     
     print_info("\nYou will be prompted for permission before any changes are made.", indent=1)
@@ -375,7 +434,7 @@ def main():
         return
 
     # --- Task Execution ---
-    for task in SETUP_TASKS:
+    for task in final_tasks:
         print_step(task["name"])
         
         if ask_yes_no(task["prompt"]):
