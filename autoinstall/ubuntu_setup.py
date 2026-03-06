@@ -3,8 +3,8 @@
 """
 Ubuntu Environment Interactive Setup Script
 
-Version: 1.1.3
-Date: 2026-03-05
+Version: 1.1.4
+Date: 2026-03-06
 
 Description:
     An interactive, data-driven script to configure a fresh Ubuntu and Debian environment.
@@ -12,6 +12,8 @@ Description:
     JSON configuration injection via the '--tasks' argument.
     
 Changelog:
+    - 1.1.4 (2026-03-06): Improved internet connectivity check for VMs (GNOME Boxes). 
+                          Increased timeout, added error context, and made it bypassable.
     - 1.1.3 (2026-03-05): Final Audit. Fixed FileNotFoundError crashes for missing core utils.
                           Prevented silent directory creation. Un-hid apt-get update output 
                           to prevent frozen UI perception. Explicit URL display for safety.
@@ -476,11 +478,14 @@ def run_preflight_checks():
             
     print_info("Checking Internet Connection...", indent=1)
     try:
-        urllib.request.urlopen('https://github.com', timeout=3)
+        # Use a lightweight endpoint with a longer timeout (helps in VMs with slow NAT)
+        urllib.request.urlopen('http://clients3.google.com/generate_204', timeout=5)
         print_success("Internet connection active.", indent=2)
-    except Exception:
-        print_error("No internet connection detected. A network connection is required.", indent=2)
-        sys.exit(1)
+    except Exception as e:
+        print_error(f"Internet check failed ({e}).", indent=2)
+        print_info("GNOME Boxes or strict firewalls can sometimes cause false positives here.", indent=2)
+        if not ask_yes_no("Are you sure you have internet and want to proceed anyway?", default="n", indent=2):
+            sys.exit(1)
 
     print_info("Checking Python Version...", indent=1)
     if sys.version_info >= (3, 6):
