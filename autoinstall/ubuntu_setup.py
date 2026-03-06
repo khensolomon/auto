@@ -3,18 +3,26 @@
 """
 Ubuntu Environment Interactive Setup Script
 
-Version: 1.0.0
-Date: 2026-03-04
+Version: 1.1.3
+Date: 2026-03-05
 
 Description:
-    An interactive, data-driven script to configure a fresh Ubuntu environment.
+    An interactive, data-driven script to configure a fresh Ubuntu and Debian environment.
     Designed to be executed directly from a URL or run locally. Supports external 
     JSON configuration injection via the '--tasks' argument.
     
 Changelog:
-    - 1.0.0 (2026-03-04): Initial stable release featuring APT package installation, 
-                          URL script execution, autostart entries, GNOME dock configuration,
-                          smart JSON task merging, and action logging for easy rollbacks.
+    - 1.1.3 (2026-03-05): Final Audit. Fixed FileNotFoundError crashes for missing core utils.
+                          Prevented silent directory creation. Un-hid apt-get update output 
+                          to prevent frozen UI perception. Explicit URL display for safety.
+    - 1.1.2 (2026-03-05): Added Debian compatibility by safely checking for the 
+                          'dash-to-dock' gsettings schema before configuring the dock.
+    - 1.1.1 (2026-03-05): Added remote URL support for custom JSON injection. Fixed 
+                          KeyErrors for malformed custom JSONs. Added graceful fallback 
+                          for headless/non-interactive environments.
+    - 1.1.0 (2026-03-05): Added intelligent pre-flight checks (OS, Internet, Python versions)
+                          and implemented package upgrade handling for existing packages.
+    - 1.0.0 (2026-03-04): Initial stable release.
 """
 
 import os
@@ -29,7 +37,12 @@ import argparse
 # 0. TERMINAL FIX FOR PIPED EXECUTION
 # ==========================================
 if not sys.stdin.isatty():
-    sys.stdin = open('/dev/tty')
+    try:
+        sys.stdin = open('/dev/tty')
+    except OSError:
+        print("\n[!] Error: No interactive terminal detected. This script requires user input.")
+        print("    If running in an automated pipeline, please run interactively.")
+        sys.exit(1)
 
 # ==========================================
 # 1. CONFIGURATION DATA
@@ -116,19 +129,16 @@ def log_action(action_data):
     """Appends structured data to the local history JSON file."""
     history = []
     
-    # Load existing history if the file exists
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, 'r') as f:
                 history = json.load(f)
         except json.JSONDecodeError:
-            pass # File is corrupt or empty, start fresh
+            pass 
 
-    # Add timestamp to the new action
     action_data["timestamp"] = datetime.datetime.now().isoformat()
     history.append(action_data)
 
-    # Save it back to the disk
     try:
         with open(LOG_FILE, 'w') as f:
             json.dump(history, f, indent=4)
@@ -216,60 +226,77 @@ def ensure_sudo(reason="Administrative privileges are required for this step.", 
     except KeyboardInterrupt:
         print_error("\nSetup aborted by user.", indent)
         sys.exit(1)
+    except FileNotFoundError:
+        print_error("Command 'sudo' not found. Cannot proceed.", indent)
+        sys.exit(1)
 
-# Helper for gsettings Rollback data
 def get_current_gsetting(schema, key):
     try:
         result = subprocess.run(['gsettings', 'get', schema, key], capture_output=True, text=True, check=True)
         return result.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
+def check_gsettings_schema_exists(schema):
+    """Checks if a gsettings schema is installed on the system."""
+    try:
+        result = subprocess.run(['gsettings', 'list-schemas'], capture_output=True, text=True, check=True)
+        return schema in result.stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
 # ==========================================
-# 4. TASK RUNNERS (The Core Logic)
+# 4. TASK RUNNERS
 # ==========================================
 def run_python_url(task):
-    print_info("Fetching and running script...")
+    if "url" not in task:
+        print_error("Task missing 'url' parameter.")
+        return
+        
+    print_info(f"Target URL: {task['url']}", indent=2)
+    print_info("Fetching and running script...", indent=2)
     try:
         with urllib.request.urlopen(task["url"]) as response:
             script_content = response.read()
         
         subprocess.run(['python3', '-'], input=script_content, check=True)
-        print_success(f"Successfully executed script from {task['url']}")
+        print_success("Successfully executed remote script.", indent=2)
         
-        # Log this action
         log_action({
-            "task_name": task["name"],
+            "task_name": task.get("name", "Unknown Task"),
             "type": "python_script_execution",
             "url_executed": task["url"],
             "note": "External scripts must be uninstalled manually if required."
         })
     except Exception as e:
-        print_error(f"Failed to execute script: {e}")
+        print_error(f"Failed to execute script: {e}", indent=2)
 
 def run_autostart_group(task):
     autostart_dir = os.path.expanduser("~/.config/autostart")
-    os.makedirs(autostart_dir, exist_ok=True)
-    
     created_files = []
 
-    for item in task["items"]:
-        if ask_yes_no(f"Add {item['app_name']} to autostart?", default="y", indent=2):
-            filepath = os.path.join(autostart_dir, item["filename"])
+    for item in task.get("items", []):
+        app_name = item.get("app_name", "Unnamed App")
+        filename = item.get("filename", "app.desktop")
+        
+        if ask_yes_no(f"Add {app_name} to autostart?", default="y", indent=2):
+            # Only create the directory if they actually consent to adding a file
+            os.makedirs(autostart_dir, exist_ok=True)
+            filepath = os.path.join(autostart_dir, filename)
             try:
                 with open(filepath, 'w') as f:
-                    clean_content = "\n".join(item["content"]) + "\n"
+                    clean_content = "\n".join(item.get("content", [])) + "\n"
                     f.write(clean_content)
-                print_success(f"Created {item['filename']}", indent=2)
+                print_success(f"Created {filename}", indent=2)
                 created_files.append(filepath)
             except IOError as e:
-                print_error(f"Failed to create {item['filename']}: {e}", indent=2)
+                print_error(f"Failed to create {filename}: {e}", indent=2)
         else:
-            print_info(f"Skipping {item['app_name']}.", indent=2)
+            print_info(f"Skipping {app_name}.", indent=2)
             
     if created_files:
         log_action({
-            "task_name": task["name"],
+            "task_name": task.get("name", "Unknown Task"),
             "type": "files_created",
             "files": created_files
         })
@@ -277,17 +304,19 @@ def run_autostart_group(task):
 def run_gnome_dock_interactive(task):
     schema = 'org.gnome.shell.extensions.dash-to-dock'
     
-    # 1. Ask user for input
-    position = ask_choice("Where do you want the dock positioned?", ["BOTTOM", "LEFT", "RIGHT", "TOP"])
+    if not check_gsettings_schema_exists(schema):
+        print_error("The 'dash-to-dock' extension schema is not found on this system.", indent=2)
+        print_info("Vanilla Debian does not include this by default. Skipping task.", indent=2)
+        return
     
-    # 2. Gather previous state for the log BEFORE changing anything
+    position = ask_choice("Where do you want the dock positioned?", ["BOTTOM", "LEFT", "RIGHT", "TOP"], indent=2)
+    
     rollback_data = [
         {"schema": schema, "key": "extend-height", "previous_value": get_current_gsetting(schema, 'extend-height')},
         {"schema": schema, "key": "dock-fixed", "previous_value": get_current_gsetting(schema, 'dock-fixed')},
         {"schema": schema, "key": "dock-position", "previous_value": get_current_gsetting(schema, 'dock-position')}
     ]
 
-    # 3. Apply the new commands
     cmds = [
         ['gsettings', 'set', schema, 'extend-height', 'false'],
         ['gsettings', 'set', schema, 'dock-fixed', 'true'],
@@ -297,18 +326,17 @@ def run_gnome_dock_interactive(task):
     for cmd in cmds:
         try:
             subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            print_error(f"Failed to execute '{' '.join(cmd)}': {e}")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print_error(f"Failed to execute '{' '.join(cmd)}': {e}", indent=2)
             return
             
-    # 4. Save the exact rollback commands to the log
     log_action({
-        "task_name": task["name"],
+        "task_name": task.get("name", "Unknown Task"),
         "type": "gsettings_modified",
         "rollback_instructions": rollback_data
     })
     
-    print_success("Dock configured successfully.")
+    print_success("Dock configured successfully.", indent=2)
 
 def run_apt_packages(task):
     packages = task.get("packages", [])
@@ -316,56 +344,80 @@ def run_apt_packages(task):
         return
 
     missing_packages = []
-    print_info("Checking package status...")
+    installed_packages = []
+    print_info("Checking package status...", indent=1)
     
     for pkg in packages:
-        result = subprocess.run(['dpkg', '-s', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode == 0:
-            print_success(f"{pkg} is already installed.", indent=2)
-        else:
-            print_error(f"{pkg} is NOT installed.", indent=2)
-            missing_packages.append(pkg)
-            
-    if not missing_packages:
-        print_success("All required packages are already installed!", indent=2)
-        return
-
-    choices = [
-        f"Install all {len(missing_packages)} missing packages",
-        "Ask to install each missing package individually",
-        "Skip package installation"
-    ]
-    choice = ask_choice("How would you like to handle the missing packages?", choices, indent=2)
-    
-    packages_to_install = []
-    
-    if choice == choices[0]:
-        packages_to_install = missing_packages
-    elif choice == choices[1]:
-        for pkg in missing_packages:
-            if ask_yes_no(f"Install {pkg}?", default="n", indent=3):
-                packages_to_install.append(pkg)
-
-    if packages_to_install:
-        ensure_sudo(reason=f"Sudo is required to install {len(packages_to_install)} package(s).", indent=2)
-        print_info("Updating package list and installing...", indent=2)
         try:
-            subprocess.run(['sudo', 'apt-get', 'update'], check=True)
-            subprocess.run(['sudo', 'apt-get', 'install', '-y'] + packages_to_install, check=True)
-            print_success("Packages installed successfully.", indent=2)
+            result = subprocess.run(['dpkg', '-s', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if result.returncode == 0:
+                print_success(f"{pkg} is already installed.", indent=2)
+                installed_packages.append(pkg)
+            else:
+                print_error(f"{pkg} is NOT installed.", indent=2)
+                missing_packages.append(pkg)
+        except FileNotFoundError:
+            print_error("Command 'dpkg' not found. Is this a Debian/Ubuntu system?", indent=2)
+            return
             
-            # Log ONLY the packages we actively installed today, not the ones that were already there
-            log_action({
-                "task_name": task["name"],
-                "type": "apt_installed",
-                "packages_installed": packages_to_install
-            })
-        except subprocess.CalledProcessError as e:
-            print_error(f"Failed to install packages: {e}", indent=2)
-    else:
-        print_info("Skipping package installation.", indent=2)
+    if missing_packages:
+        choices = [
+            f"Install all {len(missing_packages)} missing packages",
+            "Ask to install each missing package individually",
+            "Skip missing package installation"
+        ]
+        choice = ask_choice("How would you like to handle the missing packages?", choices, indent=2)
+        
+        packages_to_install = []
+        
+        if choice == choices[0]:
+            packages_to_install = missing_packages
+        elif choice == choices[1]:
+            for pkg in missing_packages:
+                if ask_yes_no(f"Install {pkg}?", default="n", indent=3):
+                    packages_to_install.append(pkg)
 
-# Map task types to their runner functions
+        if packages_to_install:
+            ensure_sudo(reason=f"Sudo is required to install {len(packages_to_install)} package(s).", indent=2)
+            print_info("Updating package list and installing...", indent=2)
+            try:
+                subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+                subprocess.run(['sudo', 'apt-get', 'install', '-y'] + packages_to_install, check=True)
+                print_success("Packages installed successfully.", indent=2)
+                
+                log_action({
+                    "task_name": task.get("name", "Unknown Task"),
+                    "type": "apt_installed",
+                    "packages_installed": packages_to_install
+                })
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print_error(f"Failed to install packages: {e}", indent=2)
+        else:
+            print_info("Skipping missing package installation.", indent=2)
+    else:
+        print_success("All required packages are already installed!", indent=2)
+
+    if installed_packages:
+        print_info("\nChecking for updates for existing packages...", indent=1)
+        if ask_yes_no(f"Would you like to check and apply updates for the {len(installed_packages)} already installed packages?", default="n", indent=2):
+            ensure_sudo(reason="Sudo is required to upgrade packages.", indent=2)
+            try:
+                # Removed stdout=DEVNULL so user sees progress and it doesn't look frozen
+                subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+                print_info("Upgrading existing packages to their newest versions...", indent=2)
+                subprocess.run(['sudo', 'apt-get', 'install', '--only-upgrade', '-y'] + installed_packages, check=True)
+                print_success("Packages updated successfully.", indent=2)
+                
+                log_action({
+                    "task_name": task.get("name", "Unknown Task"),
+                    "type": "apt_upgraded",
+                    "packages_upgraded": installed_packages
+                })
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print_error(f"Failed to upgrade packages: {e}", indent=2)
+        else:
+            print_info("Skipping package upgrades.", indent=2)
+
 TASK_HANDLERS = {
     "python_url": run_python_url,
     "autostart_group": run_autostart_group,
@@ -373,78 +425,134 @@ TASK_HANDLERS = {
     "apt_packages": run_apt_packages
 }
 
-
 # ==========================================
 # 5. MAIN ENGINE & MERGE LOGIC
 # ==========================================
 def merge_tasks(default_tasks, custom_tasks):
-    """Merges custom tasks into defaults. Overrides by 'name', or appends if new."""
     merged = []
-    # Create a dictionary of custom tasks keyed by their name for easy lookup
     custom_dict = {t['name']: t for t in custom_tasks if 'name' in t}
     
-    # 1. Update existing default tasks or keep them
     for task in default_tasks:
         if task['name'] in custom_dict:
-            merged.append(custom_dict.pop(task['name'])) # Override with user custom task
-        else:
-            merged.append(task) # Keep default task
+            user_task = custom_dict.pop(task['name'])
+            merged_task = task.copy()
             
-    # 2. Append any brand new custom tasks that weren't in the defaults
+            if task.get('type') == 'apt_packages' and 'packages' in user_task:
+                merged_task['packages'] = list(set(task.get('packages', []) + user_task['packages']))
+                merged_task['prompt'] = user_task.get('prompt', task.get('prompt'))
+            
+            elif task.get('type') == 'autostart_group' and 'items' in user_task:
+                merged_task['items'] = task.get('items', []) + user_task['items']
+                merged_task['prompt'] = user_task.get('prompt', task.get('prompt'))
+                
+            merged.append(merged_task)
+        else:
+            merged.append(task)
+            
     for task in custom_dict.values():
         merged.append(task)
         
     return merged
 
+def run_preflight_checks():
+    print_step("System Environment Checks")
+    
+    print_info("Checking Operating System...", indent=1)
+    is_ubuntu_based = False
+    try:
+        with open('/etc/os-release') as f:
+            os_data = f.read().lower()
+            if 'id=ubuntu' in os_data or 'id=debian' in os_data or 'id=pop' in os_data or 'id_like=ubuntu' in os_data:
+                is_ubuntu_based = True
+    except IOError:
+        pass
+    
+    if is_ubuntu_based:
+        print_success("Ubuntu/Debian-based OS detected.", indent=2)
+    else:
+        print_error("Non-Ubuntu OS detected. This script is designed for Debian/Ubuntu-based systems.", indent=2)
+        if not ask_yes_no("Are you sure you want to continue anyway? Things may break.", default="n", indent=2):
+            sys.exit(1)
+            
+    print_info("Checking Internet Connection...", indent=1)
+    try:
+        urllib.request.urlopen('https://github.com', timeout=3)
+        print_success("Internet connection active.", indent=2)
+    except Exception:
+        print_error("No internet connection detected. A network connection is required.", indent=2)
+        sys.exit(1)
+
+    print_info("Checking Python Version...", indent=1)
+    if sys.version_info >= (3, 6):
+        print_success(f"Python {sys.version_info.major}.{sys.version_info.minor} detected.", indent=2)
+    else:
+        print_error("Python 3.6+ is required.", indent=2)
+        sys.exit(1)
+
 def main():
-    # --- Parse Command Line Arguments ---
     parser = argparse.ArgumentParser(description="Ubuntu Environment Interactive Setup Script")
-    parser.add_argument('--tasks', type=str, help="Path to a custom JSON file to merge tasks.", default=None)
+    parser.add_argument('--tasks', type=str, help="Path or URL to a custom JSON file to merge tasks.", default=None)
     args = parser.parse_args()
 
-    # --- Determine Final Tasks List ---
     final_tasks = SETUP_TASKS
+    
     if args.tasks:
-        if os.path.exists(args.tasks):
-            try:
+        try:
+            if args.tasks.startswith('http://') or args.tasks.startswith('https://'):
+                print_info(f"Fetching remote custom tasks from {args.tasks}...", indent=0)
+                with urllib.request.urlopen(args.tasks) as response:
+                    user_tasks = json.loads(response.read().decode('utf-8'))
+                if isinstance(user_tasks, list):
+                    final_tasks = merge_tasks(SETUP_TASKS, user_tasks)
+                    print_success(f"Successfully loaded and merged custom tasks from URL", indent=0)
+                else:
+                    print_error("Remote tasks file must contain a JSON list. Using defaults.", indent=0)
+            
+            elif os.path.exists(args.tasks):
                 with open(args.tasks, 'r') as f:
                     user_tasks = json.load(f)
                 if isinstance(user_tasks, list):
                     final_tasks = merge_tasks(SETUP_TASKS, user_tasks)
                     print_success(f"Successfully loaded and merged custom tasks from {args.tasks}", indent=0)
                 else:
-                    print_error("Custom tasks file must contain a JSON list. Using defaults.", indent=0)
-            except json.JSONDecodeError as e:
-                print_error(f"Invalid JSON in {args.tasks}: {e}. Using defaults.", indent=0)
-        else:
-            print_error(f"Custom tasks file not found: {args.tasks}. Using defaults.", indent=0)
+                    print_error("Local tasks file must contain a JSON list. Using defaults.", indent=0)
+            else:
+                print_error(f"Custom tasks file/URL not found or invalid: {args.tasks}. Using defaults.", indent=0)
+                
+        except json.JSONDecodeError as e:
+            print_error(f"Invalid JSON format: {e}. Using defaults.", indent=0)
+        except Exception as e:
+            print_error(f"Failed to load custom tasks: {e}. Using defaults.", indent=0)
 
-    print_header("Ubuntu Environment Interactive Setup Script")
+    print_header("\nUbuntu Environment Interactive Setup Script")
     print_info("Running configuration...\n", indent=0)
 
-    # --- Pre-flight Review ---
+    run_preflight_checks()
+
     print_step("Pre-flight Review")
     print_info("This script is configured to offer the following setup tasks:", indent=1)
     for i, task in enumerate(final_tasks, 1):
-        print_info(f"{i}. {task['name']}", indent=2)
+        print_info(f"{i}. {task.get('name', 'Unnamed Task')}", indent=2)
     
     print_info("\nYou will be prompted for permission before any changes are made.", indent=1)
     if not ask_yes_no("Do you want to proceed with the setup wizard?", default="y", indent=1):
         print_info("Setup safely aborted by user.", indent=1)
         return
 
-    # --- Task Execution ---
     for task in final_tasks:
-        print_step(task["name"])
+        task_name = task.get("name", "Unnamed Task")
+        print_step(task_name)
         
-        if ask_yes_no(task["prompt"]):
-            handler = TASK_HANDLERS.get(task["type"])
+        prompt_text = task.get("prompt", f"Execute task: {task_name}?")
+        
+        if ask_yes_no(prompt_text):
+            handler = TASK_HANDLERS.get(task.get("type"))
             if handler:
                 handler(task)
             else:
-                print_error(f"Unknown task type: {task['type']}")
+                print_error(f"Unknown task type: {task.get('type')}")
         else:
-            print_info(f"Skipping {task['name'].lower()}.", indent=1)
+            print_info(f"Skipping {task_name.lower()}.", indent=1)
 
     print_step("Setup Complete")
     print_success(f"A detailed history of changes was saved to: {LOG_FILE}", indent=1)
