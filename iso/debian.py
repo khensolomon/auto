@@ -3,39 +3,41 @@
 """
 Debian Automated ISO Builder
 Translates the full interactive flow of debian.sh into a clean Python script.
-Generates preseed.cfg directly without external processes.
 """
 
 import os
+import sys
 import core
 import shutil
+import argparse
 
 DEPENDENCIES = ['xorriso', 'rsync', 'openssl']
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 def generate_preseed(config, user_inputs):
-    """Generates the Debian preseed string from the configuration."""
     data = config.get('autoinstall', {})
     
-    # Use user inputs or fallback to config defaults
     hostname = user_inputs['hostname']
     username = user_inputs['username']
     realname = user_inputs['realname']
     password = user_inputs['password_hash'] or data.get('password')
     locale = data.get('locale', 'en_US.UTF-8')
+    timezone = user_inputs['timezone']
     keyboard = data.get('keyboard', 'us')
+    disk_layout = user_inputs['disk_layout']
+    crypto_pass = user_inputs['crypto_pass']
     
     packages = data.get('packages', [])
-    
-    # Debloat Desktop: We force gnome-core to install a minimal GNOME
-    # This specifically avoids libreoffice and the gnome-games suite.
-    if 'gnome-core' not in packages:
-        packages.append('gnome-core')
-        
     snaps = data.get('snaps', [])
     if snaps and 'snapd' not in packages:
         packages.append('snapd')
         
+    tasksel_tasks = []
+    if 'standard' in packages:
+        packages.remove('standard')
+        tasksel_tasks.append('standard')
+        
+    tasksel_str = ", ".join(tasksel_tasks) if tasksel_tasks else ""
     packages_str = " ".join(packages)
 
     preseed = f"""# ==========================================
@@ -54,17 +56,48 @@ d-i passwd/user-fullname string {realname}
 d-i passwd/username string {username}
 d-i passwd/user-password-crypted password {password}
 d-i clock-setup/utc boolean true
-d-i time/zone string UTC
-d-i partman-auto/method string regular
+d-i time/zone string {timezone}
+"""
+
+    # Inject Disk Partitioning Layout
+    if disk_layout == 0:  # Standard
+        preseed += """d-i partman-auto/method string regular
 d-i partman-auto/choose_recipe select atomic
 d-i partman-partitioning/confirm_write_new_label boolean true
 d-i partman/choose_partition select finish
 d-i partman/confirm boolean true
 d-i partman/confirm_nooverwrite boolean true
+"""
+    elif disk_layout == 1: # LVM
+        preseed += """d-i partman-auto/method string lvm
+d-i partman-lvm/device_remove_lvm boolean true
+d-i partman-md/device_remove_md boolean true
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+d-i partman-auto/choose_recipe select atomic
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+"""
+    elif disk_layout == 2: # LUKS
+        preseed += f"""d-i partman-auto/method string crypto
+d-i partman-lvm/device_remove_lvm boolean true
+d-i partman-md/device_remove_md boolean true
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+d-i partman-auto-crypto/erase_data boolean false
+d-i partman-crypto/passphrase password {crypto_pass}
+d-i partman-crypto/passphrase-again password {crypto_pass}
+d-i partman-auto/choose_recipe select atomic
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+"""
 
-# Use 'standard' only. GNOME is pulled via gnome-core in packages to prevent bloat.
-tasksel tasksel/first multiselect standard
-
+    preseed += f"""
+tasksel tasksel/first multiselect {tasksel_str}
 d-i pkgsel/include string {packages_str}
 d-i pkgsel/upgrade select full-upgrade
 popularity-contest popularity-contest/participate boolean false
@@ -83,9 +116,6 @@ d-i preseed/late_command string \\
             preseed += f"  echo 'snap install {name} {classic}' >> /target/root/post_install.sh; \\\n"
 
     for cmd in data.get('late_cmds', []):
-        if 'ubuntu-drivers' in cmd:
-            preseed += f"  echo '# Skipped ubuntu-drivers' >> /target/root/post_install.sh; \\\n"
-            continue
         clean_cmd = cmd.replace('curtin in-target -- ', '').replace("'", "'\\''") 
         preseed += f"  echo '{clean_cmd}' >> /target/root/post_install.sh; \\\n"
 
@@ -97,13 +127,16 @@ d-i preseed/late_command string \\
     return preseed
 
 def main():
-    core.print_header("Step 1: Debian Builder Setup")
-    core.check_dependencies(DEPENDENCIES)
+    parser = argparse.ArgumentParser(description="Debian Autoinstall ISO Builder")
+    parser.add_argument('--dry-run', action='store_true', help="Generate configs only, skip ISO build")
+    args = parser.parse_args()
 
-    # 1. Workspace
+    core.print_header("Step 1: Debian Builder Setup")
+    if not args.dry_run:
+        core.check_dependencies(DEPENDENCIES)
+
     work_dir = core.setup_work_dir("~/debian-autoinstall")
     
-    # 2. YAML Config
     default_yaml = os.path.join(SCRIPT_DIR, "autoinstall.yaml")
     yaml_path = core.ask_input("Enter autoinstall.yaml path", default_yaml)
     yaml_path = os.path.expanduser(yaml_path)
@@ -111,43 +144,61 @@ def main():
     if not os.path.exists(yaml_path):
         core.print_error(f"Configuration file not found at '{yaml_path}'.")
 
-    # 3. ISO Path
-    default_iso = "/mnt/keep/os/linux/Debian/debian-12.10.0-amd64-netinst.iso"
-    iso_path = core.ask_input("Enter Source ISO Path", default_iso)
-    iso_path = os.path.expanduser(iso_path)
+    if not args.dry_run:
+        default_iso = "/mnt/keep/os/linux/Debian/debian-12.10.0-amd64-netinst.iso"
+        iso_path = core.ask_input("Enter Source ISO Path", default_iso)
+        iso_path = os.path.expanduser(iso_path)
 
-    if not os.path.exists(iso_path):
-        core.print_error(f"Source ISO not found at '{iso_path}'.")
+        if not os.path.exists(iso_path):
+            core.print_error(f"Source ISO not found at '{iso_path}'.")
+    else:
+        core.print_info("Dry-Run enabled. Skipping ISO preparation.")
 
-    # 4. Extract Defaults & Prompt
     core.print_info("Extracting data from YAML...")
     config = core.parse_simple_yaml(yaml_path)
-    # Apply debian x-os-overrides here if we expand the parser later
-    config = core.merge_os_overrides(config, os_name='debian')
     data = config.get('autoinstall', {})
 
     new_host = core.ask_input("Enter Target Hostname", data.get('hostname', 'debian-mini'))
+    new_timezone = core.ask_input("Enter Timezone (e.g., Europe/Oslo)", data.get('timezone', 'UTC'))
     new_user = core.ask_input("Enter Target Username", data.get('username', 'user'))
     new_realname = core.ask_input("Enter Target Real Name", data.get('realname', 'User'))
     
     plain_password = core.ask_password("Enter Password (blank to keep template hash)")
     password_hash = core.hash_password(plain_password) if plain_password else None
 
+    print()
+    disk_layout = core.ask_choice("Select Disk Partitioning", ["Standard (Direct Wipe)", "LVM (Logical Volume Manager)", "Encrypted LVM (LUKS)"], default=1)
+    crypto_pass = ""
+    if disk_layout == 2:
+        crypto_pass = core.ask_password("Enter Master LUKS Encryption Password")
+        if not crypto_pass:
+            core.print_error("A password is required for LUKS encryption.")
+
+    config = core.run_os_prompts(config, 'debian')
+    config = core.merge_os_overrides(config, os_name='debian')
+
     user_inputs = {
         'hostname': new_host,
+        'timezone': new_timezone,
         'username': new_user,
         'realname': new_realname,
-        'password_hash': password_hash
+        'password_hash': password_hash,
+        'disk_layout': disk_layout,
+        'crypto_pass': crypto_pass
     }
 
-    # 5. Generate Preseed File
     core.print_info("Generating preseed.cfg...")
     preseed_content = generate_preseed(config, user_inputs)
     preseed_path = os.path.join(work_dir, "preseed.cfg")
     with open(preseed_path, 'w') as f:
         f.write(preseed_content)
 
-    # 6. Extract Bootloader Configs
+    if args.dry_run:
+        # core.print_header("Dry Run Complete!")
+        # core.print_success(f"Generated config safely dropped in {work_dir}/")
+        # sys.exit(0)
+        core.dry_run_exit([preseed_path])
+
     core.print_info("Extracting GRUB and ISOLINUX configurations...")
     mnt_dir = os.path.join(work_dir, "mnt")
     extract_dir = os.path.join(work_dir, "extract")
@@ -156,7 +207,6 @@ def main():
     os.makedirs(mnt_dir, exist_ok=True)
 
     core.run_cmd(['sudo', 'mount', '-o', 'loop', iso_path, mnt_dir], capture_output=True)
-    
     shutil.copy(os.path.join(mnt_dir, "boot/grub/grub.cfg"), os.path.join(extract_dir, "boot/grub/grub.cfg"))
     
     isolinux_src = os.path.join(mnt_dir, "isolinux/menu.cfg")
@@ -166,7 +216,6 @@ def main():
 
     core.run_cmd(['sudo', 'umount', mnt_dir])
 
-    # 7. Modify GRUB (UEFI)
     core.print_info("Injecting Autoinstall entry into Debian GRUB (UEFI)...")
     grub_cfg = os.path.join(extract_dir, "boot/grub/grub.cfg")
     os.chmod(grub_cfg, 0o644)
@@ -183,12 +232,10 @@ def main():
     with open(grub_cfg, 'w') as f:
         f.write(content)
 
-    # 8. Modify ISOLINUX (Legacy BIOS)
     isolinux_cfg = os.path.join(extract_dir, "isolinux/menu.cfg")
     if has_isolinux:
         core.print_info("Injecting Autoinstall entry into ISOLINUX main menu (Legacy BIOS)...")
         os.chmod(isolinux_cfg, 0o644)
-        
         debian_iso_entry = """label autoinstall
     menu label ^Debian Autoinstall (Wipes Disk)
     kernel /install.amd/vmlinuz
@@ -196,14 +243,12 @@ def main():
 """
         with open(isolinux_cfg, 'r') as f:
             lines = f.readlines()
-            
         with open(isolinux_cfg, 'w') as f:
             for line in lines:
                 f.write(line)
                 if line.startswith("include stdmenu.cfg"):
                     f.write(debian_iso_entry)
 
-    # 9. Rebuild ISO
     iso_filename = os.path.basename(iso_path).replace('.iso', '') + '-autoinstall.iso'
     out_iso = os.path.join(work_dir, iso_filename)
     core.print_info(f"Rebuilding ISO: {out_iso}")
@@ -230,4 +275,5 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         print("\n")
+        import core
         core.print_error("Process aborted manually by user.")
