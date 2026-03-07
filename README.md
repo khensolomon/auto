@@ -3,8 +3,8 @@
 ## Automate installation
 
 ```bash
-chmod +x iso/ubuntu.sh
-chmod +x iso/debian.sh
+chmod +x iso/ubuntu.py
+chmod +x iso/debian.py
 iso/ubuntu.sh
 ./ubuntu.sh
 
