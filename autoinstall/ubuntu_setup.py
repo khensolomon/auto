@@ -3,8 +3,8 @@
 """
 Ubuntu Environment Interactive Setup Script
 
-Version: 1.1.4
-Date: 2026-03-06
+Version: 1.1.7
+Date: 2026-03-07
 
 Description:
     An interactive, data-driven script to configure a fresh Ubuntu and Debian environment.
@@ -12,18 +12,21 @@ Description:
     JSON configuration injection via the '--tasks' argument.
     
 Changelog:
+    - 1.1.7 (2026-03-07): Added default value support for multi-choice prompts. Set 
+                          GNOME dock position to default to "LEFT" (Ubuntu default).
+    - 1.1.6 (2026-03-06): Added automatic clock repair. If the VM clock is out of sync, 
+                          the script will fetch the true time from the internet and use 
+                          'sudo date -s' to fix it automatically, preventing SSL/APT failures.
+    - 1.1.5 (2026-03-06): Improved internet pre-flight check to also validate system clock 
+                          synchronization. Out-of-sync clocks in VMs cause silent APT/SSL failures.
     - 1.1.4 (2026-03-06): Improved internet connectivity check for VMs (GNOME Boxes). 
                           Increased timeout, added error context, and made it bypassable.
     - 1.1.3 (2026-03-05): Final Audit. Fixed FileNotFoundError crashes for missing core utils.
-                          Prevented silent directory creation. Un-hid apt-get update output 
-                          to prevent frozen UI perception. Explicit URL display for safety.
+                          Prevented silent directory creation. Un-hid apt-get update output.
     - 1.1.2 (2026-03-05): Added Debian compatibility by safely checking for the 
-                          'dash-to-dock' gsettings schema before configuring the dock.
-    - 1.1.1 (2026-03-05): Added remote URL support for custom JSON injection. Fixed 
-                          KeyErrors for malformed custom JSONs. Added graceful fallback 
-                          for headless/non-interactive environments.
-    - 1.1.0 (2026-03-05): Added intelligent pre-flight checks (OS, Internet, Python versions)
-                          and implemented package upgrade handling for existing packages.
+                          'dash-to-dock' gsettings schema.
+    - 1.1.1 (2026-03-05): Added remote URL support for custom JSON injection.
+    - 1.1.0 (2026-03-05): Added intelligent pre-flight checks and package upgrade handling.
     - 1.0.0 (2026-03-04): Initial stable release.
 """
 
@@ -34,6 +37,7 @@ import urllib.request
 import json
 import datetime
 import argparse
+import email.utils
 
 # ==========================================
 # 0. TERMINAL FIX FOR PIPED EXECUTION
@@ -197,26 +201,37 @@ def ask_yes_no(question, default="y", indent=1):
         else:
             print_info("Please respond with 'yes' or 'no' (or 'y' or 'n').", indent + 1)
 
-def ask_choice(question, choices, indent=1):
+def ask_choice(question, choices, default=None, indent=1):
     spacing = "  " * indent
     print(f"{spacing}{Colors.WARNING}? {question}{Colors.ENDC}")
     
     for i, choice in enumerate(choices, 1):
-        print_info(f"{i}. {choice.capitalize()}", indent + 1)
+        if default and choice == default:
+            print_info(f"{i}. {choice.capitalize()} (default)", indent + 1)
+        else:
+            print_info(f"{i}. {choice.capitalize()}", indent + 1)
+            
+    default_hint = f" [{choices.index(default) + 1}]" if default and default in choices else ""
     
     while True:
-        print(f"{spacing}{Colors.WARNING}Select an option [1-{len(choices)}]: {Colors.ENDC}", end="")
+        print(f"{spacing}{Colors.WARNING}Select an option [1-{len(choices)}]{default_hint}: {Colors.ENDC}", end="")
         try:
-            answer = int(input())
+            raw_input = input().strip()
+        except EOFError:
+            print_error("\nInput stream detached. Cannot read user input.")
+            sys.exit(1)
+            
+        if not raw_input and default and default in choices:
+            return default
+            
+        try:
+            answer = int(raw_input)
             if 1 <= answer <= len(choices):
                 return choices[answer - 1]
             else:
                 print_info(f"Please enter a number between 1 and {len(choices)}.", indent + 1)
         except ValueError:
             print_info("Please enter a valid number.", indent + 1)
-        except EOFError:
-            print_error("\nInput stream detached. Cannot read user input.")
-            sys.exit(1)
 
 def ensure_sudo(reason="Administrative privileges are required for this step.", indent=2):
     print_info(reason, indent)
@@ -282,7 +297,6 @@ def run_autostart_group(task):
         filename = item.get("filename", "app.desktop")
         
         if ask_yes_no(f"Add {app_name} to autostart?", default="y", indent=2):
-            # Only create the directory if they actually consent to adding a file
             os.makedirs(autostart_dir, exist_ok=True)
             filepath = os.path.join(autostart_dir, filename)
             try:
@@ -311,7 +325,7 @@ def run_gnome_dock_interactive(task):
         print_info("Vanilla Debian does not include this by default. Skipping task.", indent=2)
         return
     
-    position = ask_choice("Where do you want the dock positioned?", ["BOTTOM", "LEFT", "RIGHT", "TOP"], indent=2)
+    position = ask_choice("Where do you want the dock positioned?", ["BOTTOM", "LEFT", "RIGHT", "TOP"], default="LEFT", indent=2)
     
     rollback_data = [
         {"schema": schema, "key": "extend-height", "previous_value": get_current_gsetting(schema, 'extend-height')},
@@ -404,7 +418,6 @@ def run_apt_packages(task):
         if ask_yes_no(f"Would you like to check and apply updates for the {len(installed_packages)} already installed packages?", default="n", indent=2):
             ensure_sudo(reason="Sudo is required to upgrade packages.", indent=2)
             try:
-                # Removed stdout=DEVNULL so user sees progress and it doesn't look frozen
                 subprocess.run(['sudo', 'apt-get', 'update'], check=True)
                 print_info("Upgrading existing packages to their newest versions...", indent=2)
                 subprocess.run(['sudo', 'apt-get', 'install', '--only-upgrade', '-y'] + installed_packages, check=True)
@@ -476,11 +489,39 @@ def run_preflight_checks():
         if not ask_yes_no("Are you sure you want to continue anyway? Things may break.", default="n", indent=2):
             sys.exit(1)
             
-    print_info("Checking Internet Connection...", indent=1)
+    print_info("Checking Internet & System Clock...", indent=1)
     try:
-        # Use a lightweight endpoint with a longer timeout (helps in VMs with slow NAT)
-        urllib.request.urlopen('http://clients3.google.com/generate_204', timeout=5)
+        # Use a lightweight endpoint with a longer timeout
+        response = urllib.request.urlopen('http://clients3.google.com/generate_204', timeout=5)
         print_success("Internet connection active.", indent=2)
+        
+        # Check system time sync to prevent APT and SSL Certificate failures
+        server_date_str = response.headers.get('Date')
+        if server_date_str:
+            server_time = email.utils.parsedate_to_datetime(server_date_str)
+            local_time = datetime.datetime.now(datetime.timezone.utc)
+            time_diff = abs((server_time - local_time).total_seconds())
+            
+            if time_diff > 300: # Over 5 minutes desynchronized
+                print_error(f"System clock is out of sync (difference: ~{int(time_diff/60)} minutes).", indent=2)
+                print_info("A desynchronized clock will cause APT updates and SSL certificates to fail.", indent=2)
+                
+                if ask_yes_no("Would you like this script to automatically fix your system time?", default="y", indent=2):
+                    ensure_sudo(reason="Sudo is required to update the system clock.", indent=3)
+                    try:
+                        # Feed the exact time we just got from the HTTP header straight to the Linux date command
+                        subprocess.run(['sudo', 'date', '-s', server_date_str], check=True, stdout=subprocess.DEVNULL)
+                        print_success("System clock has been successfully synchronized!", indent=3)
+                    except subprocess.CalledProcessError as e:
+                        print_error(f"Failed to set system time: {e}", indent=3)
+                        if not ask_yes_no("Proceed anyway? (Downloads will likely fail)", default="n", indent=3):
+                            sys.exit(1)
+                else:
+                    if not ask_yes_no("Are you sure you want to proceed with a broken clock?", default="n", indent=2):
+                        sys.exit(1)
+            else:
+                print_success("System clock is synchronized.", indent=2)
+
     except Exception as e:
         print_error(f"Internet check failed ({e}).", indent=2)
         print_info("GNOME Boxes or strict firewalls can sometimes cause false positives here.", indent=2)
