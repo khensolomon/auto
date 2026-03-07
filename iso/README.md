@@ -1,7 +1,7 @@
 # Auto Install
 
 Guides to build a custom linux distros like (Ubuntu Desktop)
-bootable ISO with an embedded `ubuntu.yaml` configuration. The default working directory `~/ubuntu-autoinstall` is default as it is more convenient when testing, but feel free to modify as it is needed. Currently the `build.sh` support only Ubuntu base.. but I am commited to support as manay as possible distros.
+bootable ISO with an embedded `autoinstall.yaml` configuration. The default working directory `~/ubuntu-autoinstall` is default as it is more convenient when testing, but feel free to modify as it is needed. Currently the `build.sh` support only Ubuntu base.. but I am commited to support as manay as possible distros.
 
 Target ISO:
 
@@ -55,14 +55,14 @@ Needed:
 
 ```bash
 rm -rf ~/ubuntu-autoinstall
-mkdir -p ~/ubuntu-autoinstall/{mnt,extract}
+mkdir -p ~/ubuntu-iso/{mnt,extract}
 ```
 
 ## 2. Mount Original ISO
 
 ```bash
 sudo mount /mnt/keep/os/linux/Ubuntu/ubuntu-24.04.4-desktop-amd64.iso \
-    ~/ubuntu-autoinstall/mnt
+    ~/ubuntu-iso/mnt
 ```
 
 (Note: ISO mounts read-only. This is expected.)
@@ -70,10 +70,10 @@ sudo mount /mnt/keep/os/linux/Ubuntu/ubuntu-24.04.4-desktop-amd64.iso \
 ## 3. Copy ISO Contents
 
 ```bash
-rsync -a ~/ubuntu-autoinstall/mnt/ \
-    ~/ubuntu-autoinstall/extract/
+rsync -a ~/ubuntu-iso/mnt/ \
+    ~/ubuntu-iso/extract/
 
-sudo umount ~/ubuntu-autoinstall/mnt
+sudo umount ~/ubuntu-iso/mnt
 ```
 
 Now the `extract/` directory is writable.
@@ -83,13 +83,13 @@ Now the `extract/` directory is writable.
 Create directory and files:
 
 ```bash
-sudo mkdir ~/ubuntu-autoinstall/extract/nocloud
+sudo mkdir ~/ubuntu-iso/extract/nocloud
 
-# Create user-data, get content from ubuntu.yaml
-sudo nano ~/ubuntu-autoinstall/extract/nocloud/user-data
+# Create user-data, get content from autoinstall.yaml
+sudo nano ~/ubuntu-iso/extract/nocloud/user-data
 
 #  Create meta-data 
-sudo nano ~/ubuntu-autoinstall/extract/nocloud/meta-data
+sudo nano ~/ubuntu-iso/extract/nocloud/meta-data
 # Content:
 #     instance-id: desktop-autoinstall
 ```
@@ -99,7 +99,7 @@ sudo nano ~/ubuntu-autoinstall/extract/nocloud/meta-data
 Edit:
 
 ```bash
-nano ~/ubuntu-autoinstall/extract/boot/grub/grub.cfg
+nano ~/ubuntu-iso/extract/boot/grub/grub.cfg
 
 # Find:
 linux   /casper/vmlinuz quiet splash ---

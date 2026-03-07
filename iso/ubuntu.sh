@@ -88,9 +88,9 @@ sudo umount "$WORK_DIR/mnt"
 
 header "Step 3: Configuration & Customization"
 
-# 3. Prompt for ubuntu.yaml location
-DEFAULT_TEMPLATE="$SCRIPT_DIR/ubuntu.yaml"
-read -p "$(echo -e "Enter path to ubuntu.yaml template [$DEFAULT_TEMPLATE]: ")" TEMPLATE_PATH
+# 3. Prompt for autoinstall.yaml location
+DEFAULT_TEMPLATE="$SCRIPT_DIR/autoinstall.yaml"
+read -p "$(echo -e "Enter path to autoinstall.yaml template [$DEFAULT_TEMPLATE]: ")" TEMPLATE_PATH
 TEMPLATE_PATH=${TEMPLATE_PATH:-$DEFAULT_TEMPLATE}
 TEMPLATE_PATH="${TEMPLATE_PATH/#\~/$REAL_HOME}"
 

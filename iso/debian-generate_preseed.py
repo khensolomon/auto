@@ -78,8 +78,8 @@ def get_simple_yaml_data(filepath):
 def main():
     # Setup built-in arguments parser for dynamic overrides
     parser = argparse.ArgumentParser(description="Generate Debian preseed from Ubuntu autoinstall YAML")
-    parser.add_argument("--yaml", default="autoinstall/ubuntu.yaml", help="Source YAML file")
-    parser.add_argument("--out", default="autoinstall/preseed.cfg", help="Output preseed file")
+    parser.add_argument("--yaml", default="iso/autoinstall.yaml", help="Source YAML file")
+    parser.add_argument("--out", default="iso/preseed.cfg", help="Output preseed file")
     parser.add_argument("--hostname", help="Override hostname")
     parser.add_argument("--username", help="Override username")
     parser.add_argument("--realname", help="Override real name")

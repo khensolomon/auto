@@ -50,8 +50,8 @@ fi
 mkdir -p "$WORK_DIR"
 
 # --- 2. Prompt for YAML Configuration ---
-DEFAULT_YAML="$SCRIPT_DIR/ubuntu.yaml"
-echo -n -e "${YELLOW}Enter ubuntu.yaml path [${DEFAULT_YAML}]: ${NC}"
+DEFAULT_YAML="$SCRIPT_DIR/autoinstall.yaml"
+echo -n -e "${YELLOW}Enter autoinstall.yaml path [${DEFAULT_YAML}]: ${NC}"
 read YAML_PATH
 YAML_PATH=${YAML_PATH:-$DEFAULT_YAML}
 
@@ -121,7 +121,7 @@ fi
 
 # --- 5. Generate Preseed File directly into WORK_DIR ---
 info "Generating preseed.cfg from $YAML_PATH..."
-python3 "$SCRIPT_DIR/generate_preseed.py" \
+python3 "$SCRIPT_DIR/debian-generate_preseed.py" \
     --yaml "$YAML_PATH" \
     --out "$WORK_DIR/preseed.cfg" \
     --hostname "$NEW_HOST" \
