@@ -5,7 +5,8 @@
 ```bash
 chmod +x iso/ubuntu.py
 chmod +x iso/debian.py
-iso/ubuntu.sh
+iso/debian --dry-run
+iso/ubuntu --dry-run
 ./ubuntu.sh
 
 # Ubuntu Environment Interactive Setup Script
