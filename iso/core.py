@@ -12,6 +12,9 @@ import shutil
 import getpass
 import re
 
+# Global flag for unattended execution
+UNATTENDED = False
+
 class Colors:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -48,33 +51,111 @@ def run_cmd(cmd, check=True, cwd=None, shell=False, capture_output=False):
     except subprocess.CalledProcessError as e:
         print_error(f"Command failed: {' '.join(cmd) if isinstance(cmd, list) else cmd}\nError: {e.stderr if capture_output else e}")
 
-def dry_run_exit(filepaths):
-    """Prints the contents of the generated config files and exits safely."""
-    print_header("Dry Run Complete!")
-    for fp in filepaths:
-        if os.path.exists(fp):
-            print(f"\n{Colors.WARNING}>>> START OF {os.path.basename(fp)} <<<{Colors.ENDC}")
-            with open(fp, 'r') as f:
-                print(f.read().strip())
-            print(f"{Colors.WARNING}>>> END OF {os.path.basename(fp)} <<<{Colors.ENDC}")
+def get_host_timezone():
+    """Attempts to auto-detect the host machine's timezone."""
+    try:
+        with open('/etc/timezone', 'r') as f:
+            tz = f.read().strip()
+            if tz: return tz
+    except Exception: pass
     
-    print(f"\n{Colors.OKGREEN}[SUCCESS]{Colors.ENDC} Generated configs safely dropped in the workspace.")
-    sys.exit(1)
+    try:
+        target = os.readlink('/etc/localtime')
+        if 'zoneinfo/' in target:
+            return target.split('zoneinfo/')[1]
+    except Exception: pass
+    return "UTC"
+
+def get_host_locale():
+    """Attempts to auto-detect the host machine's locale."""
+    try:
+        with open('/etc/default/locale', 'r') as f:
+            for line in f:
+                if line.startswith('LANG='):
+                    return line.split('=', 1)[1].strip(' \n\r"\'')
+    except Exception: pass
+    return os.environ.get('LANG', '')
+
+def get_host_keyboard():
+    """Attempts to auto-detect the host machine's keyboard layout, variant, and toggle."""
+    kb = {'layout': '', 'variant': '', 'toggle': ''}
+    try:
+        with open('/etc/default/keyboard', 'r') as f:
+            for line in f:
+                if line.startswith('XKBLAYOUT='):
+                    kb['layout'] = line.split('=', 1)[1].strip(' \n\r"\'')
+                elif line.startswith('XKBVARIANT='):
+                    kb['variant'] = line.split('=', 1)[1].strip(' \n\r"\'')
+                elif line.startswith('XKBOPTIONS='):
+                    opts = line.split('=', 1)[1].strip(' \n\r"\'')
+                    for opt in opts.split(','):
+                        if opt.startswith('grp:'):
+                            kb['toggle'] = opt
+    except Exception: pass
+    return kb
+
+def discover_isos(os_hint=""):
+    """Scans common directories for ISO files."""
+    search_dirs = [
+        os.getcwd(),
+        os.path.expanduser('~/Downloads'),
+        f'/mnt/keep/os/linux/{os_hint}' if os_hint else '/mnt/keep/os/linux'
+    ]
+    
+    isos = []
+    for d in search_dirs:
+        if os.path.exists(d):
+            for f in os.listdir(d):
+                if f.lower().endswith('.iso'):
+                    isos.append(os.path.join(d, f))
+    return sorted(list(set(isos)))
+
+def ask_iso_path(os_hint=""):
+    """Presents a menu of discovered ISOs or allows manual entry."""
+    isos = discover_isos(os_hint)
+    if UNATTENDED:
+        if isos:
+            print(f"{Colors.OKBLUE}[AUTO]{Colors.ENDC} Selected Source ISO: {isos[0]}")
+            return isos[0]
+        print_error("Unattended mode failed: No ISOs found automatically.")
+
+    if not isos:
+        return ask_input("Enter path to source ISO")
+    
+    choices = [os.path.basename(iso) for iso in isos] + ["Enter custom path manually..."]
+    idx = ask_choice("Select Source ISO", choices, default=1)
+    
+    if idx == len(isos):
+        return ask_input("Enter custom path to source ISO")
+    return isos[idx]
 
 def ask_input(prompt_text, default_val=""):
+    if UNATTENDED:
+        print(f"{Colors.OKBLUE}[AUTO]{Colors.ENDC} {prompt_text}: {default_val}")
+        return default_val
     prompt = f"{Colors.WARNING}{prompt_text} [{default_val}]: {Colors.ENDC}"
     val = input(prompt).strip()
     return val if val else default_val
 
 def ask_yes_no(prompt_text, default="y"):
-    hint = "[Y/n]" if default.lower() in ['y', 'yes'] else "[y/N]"
+    is_yes_default = default.lower() in ['y', 'yes']
+    if UNATTENDED:
+        print(f"{Colors.OKBLUE}[AUTO]{Colors.ENDC} {prompt_text}: {'Yes' if is_yes_default else 'No'}")
+        return is_yes_default
+        
+    hint = "[Y/n]" if is_yes_default else "[y/N]"
     prompt = f"{Colors.WARNING}{prompt_text} {hint}: {Colors.ENDC}"
     val = input(prompt).strip().lower()
     if not val:
-        val = 'y' if default.lower() in ['y', 'yes'] else 'n'
+        val = 'y' if is_yes_default else 'n'
     return val in ['y', 'yes']
 
 def ask_choice(question, choices, default=None):
+    if UNATTENDED:
+        idx = (int(default) - 1) if default else 0
+        print(f"{Colors.OKBLUE}[AUTO]{Colors.ENDC} {question}: {choices[idx]}")
+        return idx
+
     print(f"{Colors.WARNING}{question}{Colors.ENDC}")
     for i, choice in enumerate(choices, 1):
         if default and str(default) == str(i):
@@ -96,6 +177,9 @@ def ask_choice(question, choices, default=None):
         print(f"  Please enter a valid number between 1 and {len(choices)}.")
 
 def ask_password(prompt_text):
+    if UNATTENDED:
+        print(f"{Colors.OKBLUE}[AUTO]{Colors.ENDC} {prompt_text}: (Skipped in unattended mode)")
+        return ""
     print(f"{Colors.WARNING}{prompt_text}: {Colors.ENDC}", end="", flush=True)
     return getpass.getpass("")
 
@@ -109,7 +193,8 @@ def setup_work_dir(default_dir):
     work_dir = ask_input("Enter working directory", default_dir)
     work_dir = os.path.expanduser(work_dir)
     if os.path.exists(work_dir):
-        print_warning(f"Directory {work_dir} already exists.")
+        if not UNATTENDED:
+            print_warning(f"Directory {work_dir} already exists.")
         if ask_yes_no("Clean up and recreate?"):
             print_info("Cleaning up old workspace...")
             run_cmd(['sudo', 'rm', '-rf', work_dir])
@@ -120,6 +205,18 @@ def check_dependencies(deps):
     missing = [dep for dep in deps if not shutil.which(dep)]
     if missing:
         print_error(f"Missing required tools: {', '.join(missing)}\nPlease install them: sudo apt install {' '.join(missing)}")
+
+def dry_run_exit(filepaths):
+    print_header("Dry Run Complete!")
+    for fp in filepaths:
+        if os.path.exists(fp):
+            print(f"\n{Colors.WARNING}>>> START OF {os.path.basename(fp)} <<<{Colors.ENDC}")
+            with open(fp, 'r') as f:
+                print(f.read().strip())
+            print(f"{Colors.WARNING}>>> END OF {os.path.basename(fp)} <<<{Colors.ENDC}")
+    
+    print(f"\n{Colors.OKGREEN}[SUCCESS]{Colors.ENDC} Generated configs safely dropped in the workspace.")
+    sys.exit(0)
 
 def get_yaml_value(filepath, key):
     if not os.path.exists(filepath):
@@ -144,7 +241,8 @@ def parse_simple_yaml(filepath):
         print_error(f"YAML file not found: {filepath}")
 
     data = {
-        'locale': 'en_US.UTF-8', 'timezone': 'UTC', 'keyboard': 'us', 'hostname': 'ubuntu-mini',
+        'locale': 'en_US.UTF-8', 'timezone': 'UTC', 'keyboard': 'us',
+        'keyboard_variant': '', 'keyboard_toggle': '', 'hostname': 'ubuntu-mini',
         'username': 'user', 'realname': 'User', 'password': '',
         'packages': [], 'snaps': [], 'late_cmds': []
     }
@@ -243,6 +341,8 @@ def parse_simple_yaml(filepath):
                 if line.startswith('  locale:'): data['locale'] = _clean_val(line.split(':', 1)[1])
                 elif line.startswith('  timezone:'): data['timezone'] = _clean_val(line.split(':', 1)[1])
                 elif line.startswith('    layout:'): data['keyboard'] = _clean_val(line.split(':', 1)[1])
+                elif line.startswith('    variant:'): data['keyboard_variant'] = _clean_val(line.split(':', 1)[1])
+                elif line.startswith('    toggle:'): data['keyboard_toggle'] = _clean_val(line.split(':', 1)[1])
                 elif line.startswith('    hostname:'): data['hostname'] = _clean_val(line.split(':', 1)[1])
                 elif line.startswith('    username:'): data['username'] = _clean_val(line.split(':', 1)[1])
                 elif line.startswith('    realname:'): data['realname'] = _clean_val(line.split(':', 1)[1])
@@ -284,9 +384,10 @@ def run_os_prompts(config, os_name):
     if os_prompts: prompt_groups.append((os_name.capitalize(), os_prompts))
         
     for group_name, prompts in prompt_groups:
-        print_header(f"Dynamic Options: {group_name}")
+        if not UNATTENDED:
+            print_header(f"Dynamic Options: {group_name}")
         for p in prompts:
-            print() # Padding
+            if not UNATTENDED: print()
             target_dict = None
             if 'choices' in p and p['choices']:
                 labels = [c['label'] for c in p['choices']]

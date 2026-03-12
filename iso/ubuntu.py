@@ -9,6 +9,7 @@ import os
 import shutil
 import core
 import argparse
+import sys
 
 DEPENDENCIES = ['xorriso', 'rsync', 'openssl']
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -16,7 +17,11 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 def main():
     parser = argparse.ArgumentParser(description="Ubuntu Autoinstall ISO Builder")
     parser.add_argument('--dry-run', action='store_true', help="Generate configs only, skip ISO build")
+    parser.add_argument('--unattended', action='store_true', help="Skip all prompts and use defaults")
     args = parser.parse_args()
+
+    if args.unattended:
+        core.UNATTENDED = True
 
     core.print_header("Step 1: Environment & Workspace Setup")
     if not args.dry_run:
@@ -27,8 +32,7 @@ def main():
 
     if not args.dry_run:
         core.print_header("Step 2: ISO Preparation")
-        default_iso = "/mnt/keep/os/linux/Ubuntu/ubuntu-25.10-desktop-amd64.iso"
-        iso_path = core.ask_input("Enter path to source Ubuntu ISO", default_iso)
+        iso_path = core.ask_iso_path(os_hint="Ubuntu")
         iso_path = os.path.expanduser(iso_path)
 
         if not os.path.exists(iso_path):
@@ -40,9 +44,15 @@ def main():
         os.makedirs(mnt_dir, exist_ok=True)
         os.makedirs(os.path.join(extract_dir, 'boot/grub'), exist_ok=True)
         
+        # Robust Mount Failsafe
         core.run_cmd(['sudo', 'mount', '-o', 'loop', iso_path, mnt_dir])
-        shutil.copy(os.path.join(mnt_dir, 'boot/grub/grub.cfg'), os.path.join(extract_dir, 'boot/grub/grub.cfg'))
-        core.run_cmd(['sudo', 'umount', mnt_dir])
+        try:
+            if not os.path.exists(os.path.join(mnt_dir, 'casper')):
+                core.print_error("This does not look like an Ubuntu ISO (missing '/casper' directory). Did you select a Debian ISO by mistake?")
+            
+            shutil.copy(os.path.join(mnt_dir, 'boot/grub/grub.cfg'), os.path.join(extract_dir, 'boot/grub/grub.cfg'))
+        finally:
+            core.run_cmd(['sudo', 'umount', mnt_dir])
     else:
         extract_dir = os.path.join(work_dir, 'extract')
         core.print_info("Dry-Run enabled. Skipping ISO mount/extraction.")
@@ -59,13 +69,31 @@ def main():
     config = core.parse_simple_yaml(yaml_path)
     data = config.get('autoinstall', {})
 
+    # Auto-detect Host system defaults
+    host_tz = core.get_host_timezone()
+    host_locale = core.get_host_locale()
+    host_kb = core.get_host_keyboard()
+
+    # Prioritize Host OS -> YAML -> Hardcoded
+    def_locale = host_locale or data.get('locale', 'en_US.UTF-8')
+    def_layout = host_kb['layout'] or data.get('keyboard', 'us')
+    def_variant = host_kb['variant'] or data.get('keyboard_variant', '')
+    def_toggle = host_kb['toggle'] or data.get('keyboard_toggle', '')
+
     new_hostname = core.ask_input("Enter Hostname", data.get('hostname', 'ubuntu-mini'))
-    new_locale = core.ask_input("Enter System Locale (Hint: en_US.UTF-8)", data.get('locale', 'en_US.UTF-8'))
-    new_timezone = core.ask_input("Enter Timezone (e.g., Europe/Oslo)", data.get('timezone', 'UTC'))
+    new_timezone = core.ask_input(f"Enter Timezone (Host: {host_tz})", data.get('timezone', host_tz))
     
-    yaml_layout = core.get_yaml_value(yaml_path, "layout") or "us"
-    kybd_layout = core.ask_input("Enter Keyboard Layout", yaml_layout)
-    kybd_variant = core.ask_input("Enter Keyboard Variant", "")
+    loc_hint = f"Host: {host_locale}" if host_locale else "e.g., en_US.UTF-8"
+    new_locale = core.ask_input(f"Enter System Locale ({loc_hint})", def_locale)
+    
+    lyt_hint = f"Host: {host_kb['layout']}" if host_kb['layout'] else "e.g., us, no"
+    kybd_layout = core.ask_input(f"Enter Keyboard Layout ({lyt_hint})", def_layout)
+    
+    var_hint = f"Host: {host_kb['variant']}" if host_kb['variant'] else "leave blank for none"
+    kybd_variant = core.ask_input(f"Enter Keyboard Variant ({var_hint})", def_variant)
+    
+    tgl_hint = f"Host: {host_kb['toggle']}" if host_kb['toggle'] else "e.g., grp:alt_shift_toggle"
+    kybd_toggle = core.ask_input(f"Enter Keyboard Toggle ({tgl_hint})", def_toggle)
     
     new_user = core.ask_input("Enter Username", data.get('username', 'ubuntu'))
     new_realname = core.ask_input("Enter Real Name", data.get('realname', 'User'))
@@ -73,8 +101,7 @@ def main():
     plain_password = core.ask_password("Enter New Password (blank to keep template hash)")
     password_hash = core.hash_password(plain_password) if plain_password else None
 
-    # Disk Partitioning Prompt
-    print()
+    if not core.UNATTENDED: print()
     disk_layout = core.ask_choice("Select Disk Partitioning", ["Standard (Direct Wipe)", "LVM (Logical Volume Manager)"], default=1)
 
     # Run the dynamic YAML prompts!
@@ -102,10 +129,12 @@ def main():
     core.replace_in_file(user_data_path, r"^(\s*timezone:).*", rf"\1 {new_timezone}")
     core.replace_in_file(user_data_path, r"^(\s*username:).*", rf"\1 {new_user}")
     core.replace_in_file(user_data_path, r"^(\s*realname:).*", rf'\1 "{new_realname}"')
-    core.replace_in_file(user_data_path, r"^(\s*layout:)\s*\".*\"", rf'\1 "{kybd_layout}"')
-    core.replace_in_file(user_data_path, r"^(\s*variant:)\s*\".*\"", rf'\1 "{kybd_variant}"')
     
-    # Safely swap Storage to LVM if selected
+    # FIX: Strictly map to 4-spaces to guarantee we never accidentally overwrite `storage:` layout again!
+    core.replace_in_file(user_data_path, r"^(    layout:).*", rf'\1 "{kybd_layout}"')
+    core.replace_in_file(user_data_path, r"^(    variant:).*", rf'\1 "{kybd_variant}"')
+    core.replace_in_file(user_data_path, r"^(    toggle:).*", rf'\1 "{kybd_toggle}"')
+    
     if disk_layout == 1:
         core.replace_in_file(user_data_path, r"^(\s*name:)\s*direct", rf"\1 lvm")
 
@@ -123,9 +152,6 @@ def main():
         f.write(f"local-hostname: {new_hostname}\n")
 
     if args.dry_run:
-        # core.print_header("Dry Run Complete!")
-        # core.print_success(f"Generated configs safely dropped in {extract_dir}/nocloud/")
-        # sys.exit(0)
         core.dry_run_exit([user_data_path, meta_data_path])
 
     core.print_header("Step 5: Modifying Bootloader & Building ISO")
@@ -145,19 +171,20 @@ def main():
             f.write(content)
         core.print_success("GRUB entry added successfully.")
 
-    iso_filename = os.path.basename(iso_path).replace('.iso', '') + '-autoinstall.iso'
-    out_iso = os.path.join(work_dir, iso_filename)
-    
-    core.print_info(f"Running xorriso to build final ISO: {out_iso}...")
-    xorriso_cmd = [
-        'sudo', 'xorriso',
-        '-indev', iso_path,
-        '-outdev', out_iso,
-        '-boot_image', 'any', 'replay',
-        '-map', os.path.join(work_dir, 'extract/nocloud'), '/nocloud',
-        '-map', grub_cfg, '/boot/grub/grub.cfg'
-    ]
-    core.run_cmd(xorriso_cmd, cwd=work_dir)
+    if 'iso_path' in locals():
+        iso_filename = os.path.basename(iso_path).replace('.iso', '') + '-autoinstall.iso'
+        out_iso = os.path.join(work_dir, iso_filename)
+        
+        core.print_info(f"Running xorriso to build final ISO: {out_iso}...")
+        xorriso_cmd = [
+            'sudo', 'xorriso',
+            '-indev', iso_path,
+            '-outdev', out_iso,
+            '-boot_image', 'any', 'replay',
+            '-map', os.path.join(work_dir, 'extract/nocloud'), '/nocloud',
+            '-map', grub_cfg, '/boot/grub/grub.cfg'
+        ]
+        core.run_cmd(xorriso_cmd, cwd=work_dir)
 
     user = os.environ.get('SUDO_USER', os.environ.get('USER'))
     if user:

@@ -10,6 +10,7 @@ autoinstall:
   keyboard:
     layout: "no"
     variant: ""
+    toggle: ""
 
   identity:
     hostname: os-mini
@@ -41,7 +42,7 @@ autoinstall:
     - openssh-server
 
   snaps:
-    - name: code
+    # - name: code
     #   classic: true
     # - name: dbeaver-ce
     # - name: docker

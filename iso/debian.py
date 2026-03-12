@@ -21,11 +21,15 @@ def generate_preseed(config, user_inputs):
     username = user_inputs['username']
     realname = user_inputs['realname']
     password = user_inputs['password_hash'] or data.get('password')
-    locale = data.get('locale', 'en_US.UTF-8')
     timezone = user_inputs['timezone']
-    keyboard = data.get('keyboard', 'us')
     disk_layout = user_inputs['disk_layout']
     crypto_pass = user_inputs['crypto_pass']
+    
+    # Safely pull locale and keyboard from prompts, falling back to YAML
+    locale = user_inputs.get('locale', data.get('locale', 'en_US.UTF-8'))
+    keyboard = user_inputs.get('layout', data.get('keyboard', 'us'))
+    kybd_variant = user_inputs.get('variant', '')
+    kybd_toggle = user_inputs.get('toggle', '')
     
     packages = data.get('packages', [])
     snaps = data.get('snaps', [])
@@ -59,7 +63,11 @@ d-i clock-setup/utc boolean true
 d-i time/zone string {timezone}
 """
 
-    # Inject Disk Partitioning Layout
+    if kybd_variant:
+        preseed += f"d-i keyboard-configuration/variant string {kybd_variant}\n"
+    if kybd_toggle:
+        preseed += f"d-i keyboard-configuration/optionscode string {kybd_toggle}\n"
+
     if disk_layout == 0:  # Standard
         preseed += """d-i partman-auto/method string regular
 d-i partman-auto/choose_recipe select atomic
@@ -129,7 +137,11 @@ d-i preseed/late_command string \\
 def main():
     parser = argparse.ArgumentParser(description="Debian Autoinstall ISO Builder")
     parser.add_argument('--dry-run', action='store_true', help="Generate configs only, skip ISO build")
+    parser.add_argument('--unattended', action='store_true', help="Skip all prompts and use defaults")
     args = parser.parse_args()
+
+    if args.unattended:
+        core.UNATTENDED = True
 
     core.print_header("Step 1: Debian Builder Setup")
     if not args.dry_run:
@@ -145,8 +157,7 @@ def main():
         core.print_error(f"Configuration file not found at '{yaml_path}'.")
 
     if not args.dry_run:
-        default_iso = "/mnt/keep/os/linux/Debian/debian-12.10.0-amd64-netinst.iso"
-        iso_path = core.ask_input("Enter Source ISO Path", default_iso)
+        iso_path = core.ask_iso_path(os_hint="Debian")
         iso_path = os.path.expanduser(iso_path)
 
         if not os.path.exists(iso_path):
@@ -158,15 +169,39 @@ def main():
     config = core.parse_simple_yaml(yaml_path)
     data = config.get('autoinstall', {})
 
+    # Auto-detect Host system defaults
+    host_tz = core.get_host_timezone()
+    host_locale = core.get_host_locale()
+    host_kb = core.get_host_keyboard()
+
+    # Prioritize Host OS -> YAML -> Hardcoded
+    def_locale = host_locale or data.get('locale', 'en_US.UTF-8')
+    def_layout = host_kb['layout'] or data.get('keyboard', 'us')
+    def_variant = host_kb['variant'] or data.get('keyboard_variant', '')
+    def_toggle = host_kb['toggle'] or data.get('keyboard_toggle', '')
+
     new_host = core.ask_input("Enter Target Hostname", data.get('hostname', 'debian-mini'))
-    new_timezone = core.ask_input("Enter Timezone (e.g., Europe/Oslo)", data.get('timezone', 'UTC'))
+    new_timezone = core.ask_input(f"Enter Timezone (Host: {host_tz})", data.get('timezone', host_tz))
+    
+    loc_hint = f"Host: {host_locale}" if host_locale else "e.g., en_US.UTF-8"
+    new_locale = core.ask_input(f"Enter System Locale ({loc_hint})", def_locale)
+    
+    lyt_hint = f"Host: {host_kb['layout']}" if host_kb['layout'] else "e.g., us, no"
+    kybd_layout = core.ask_input(f"Enter Keyboard Layout ({lyt_hint})", def_layout)
+    
+    var_hint = f"Host: {host_kb['variant']}" if host_kb['variant'] else "leave blank for none"
+    kybd_variant = core.ask_input(f"Enter Keyboard Variant ({var_hint})", def_variant)
+    
+    tgl_hint = f"Host: {host_kb['toggle']}" if host_kb['toggle'] else "e.g., grp:alt_shift_toggle"
+    kybd_toggle = core.ask_input(f"Enter Keyboard Toggle ({tgl_hint})", def_toggle)
+
     new_user = core.ask_input("Enter Target Username", data.get('username', 'user'))
     new_realname = core.ask_input("Enter Target Real Name", data.get('realname', 'User'))
     
     plain_password = core.ask_password("Enter Password (blank to keep template hash)")
     password_hash = core.hash_password(plain_password) if plain_password else None
 
-    print()
+    if not core.UNATTENDED: print()
     disk_layout = core.ask_choice("Select Disk Partitioning", ["Standard (Direct Wipe)", "LVM (Logical Volume Manager)", "Encrypted LVM (LUKS)"], default=1)
     crypto_pass = ""
     if disk_layout == 2:
@@ -180,6 +215,10 @@ def main():
     user_inputs = {
         'hostname': new_host,
         'timezone': new_timezone,
+        'locale': new_locale,
+        'layout': kybd_layout,
+        'variant': kybd_variant,
+        'toggle': kybd_toggle,
         'username': new_user,
         'realname': new_realname,
         'password_hash': password_hash,
@@ -194,9 +233,6 @@ def main():
         f.write(preseed_content)
 
     if args.dry_run:
-        # core.print_header("Dry Run Complete!")
-        # core.print_success(f"Generated config safely dropped in {work_dir}/")
-        # sys.exit(0)
         core.dry_run_exit([preseed_path])
 
     core.print_info("Extracting GRUB and ISOLINUX configurations...")
@@ -206,15 +242,20 @@ def main():
     os.makedirs(os.path.join(extract_dir, "isolinux"), exist_ok=True)
     os.makedirs(mnt_dir, exist_ok=True)
 
+    # Robust Mount Failsafe
     core.run_cmd(['sudo', 'mount', '-o', 'loop', iso_path, mnt_dir], capture_output=True)
-    shutil.copy(os.path.join(mnt_dir, "boot/grub/grub.cfg"), os.path.join(extract_dir, "boot/grub/grub.cfg"))
-    
-    isolinux_src = os.path.join(mnt_dir, "isolinux/menu.cfg")
-    has_isolinux = os.path.exists(isolinux_src)
-    if has_isolinux:
-        shutil.copy(isolinux_src, os.path.join(extract_dir, "isolinux/menu.cfg"))
+    try:
+        if not os.path.exists(os.path.join(mnt_dir, 'install.amd')):
+            core.print_error("This does not look like a Debian Netinst ISO (missing '/install.amd' directory). Did you select an Ubuntu ISO by mistake?")
 
-    core.run_cmd(['sudo', 'umount', mnt_dir])
+        shutil.copy(os.path.join(mnt_dir, "boot/grub/grub.cfg"), os.path.join(extract_dir, "boot/grub/grub.cfg"))
+        
+        isolinux_src = os.path.join(mnt_dir, "isolinux/menu.cfg")
+        has_isolinux = os.path.exists(isolinux_src)
+        if has_isolinux:
+            shutil.copy(isolinux_src, os.path.join(extract_dir, "isolinux/menu.cfg"))
+    finally:
+        core.run_cmd(['sudo', 'umount', mnt_dir])
 
     core.print_info("Injecting Autoinstall entry into Debian GRUB (UEFI)...")
     grub_cfg = os.path.join(extract_dir, "boot/grub/grub.cfg")
