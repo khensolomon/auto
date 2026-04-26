@@ -1,10 +1,9 @@
-# /opt/bucket/storage/r2/data.conf
+# /opt/bucket/storage/access/r2.conf
 #
 # Cloudflare R2 credentials and tool defaults.
 # This file should be chmod 600, owned by root.
 #
 # Any value can be overridden by an environment variable of the same name.
-# (Useful for systemd drop-ins or temporary overrides.)
 
 # === Cloudflare R2 (required) ===
 R2_ACCOUNT_ID=your_cloudflare_account_id_here
@@ -15,7 +14,7 @@ R2_BUCKET=storage
 
 # === Tool defaults (optional) ===
 
-# How many timestamped dumps to keep when running `data.py prune mysql`.
+# How many timestamped dumps to keep when running `r2.py prune mysql`.
 # latest.sql.gz is never pruned.
 RETENTION_KEEP=7
 
@@ -26,3 +25,8 @@ COMPRESSION_LEVEL=6
 # Filesystem root the script operates under. The script refuses to run if
 # cwd is not somewhere under this path.
 R2_ROOT=/opt/bucket
+
+# Where deployment .env files live (used to detect deployed apps).
+# A folder under R2_ROOT/<bucket>/<n>/ is treated as an app if and only
+# if <APP_DEPLOY_ROOT>/<n>/.env exists.
+APP_DEPLOY_ROOT=/opt

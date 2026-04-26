@@ -1,44 +1,46 @@
 #!/usr/bin/env python3
 """
-data.py — Cloudflare R2 backup/restore tool for Docker Swarm apps.
+r2.py — Cloudflare R2 backup/restore tool for Docker Swarm apps.
 
-Lives at: /opt/bucket/storage/r2/data.py
-Config:   /opt/bucket/storage/r2/data.conf
+Source:   https://github.com/khensolomon/lets/blob/make/server/r2.py
+Config:   /opt/bucket/storage/access/r2.conf  (default; overridable via --config)
 
 Usage (run from inside an app's bucket folder, e.g. /opt/bucket/storage/myordbok/):
 
-    data.py backup mysql              Dump live DB via docker exec, upload to R2
-    data.py restore mysql             Download latest.sql.gz from R2 to ./mysql/
-    data.py restore mysql --if-empty  Only restore if local latest.sql.gz missing
-    data.py list mysql                Show available R2 dumps
-    data.py prune mysql --keep 7      Delete old timestamped dumps, keep N newest
+    r2.py backup mysql              Dump live DB via docker exec, upload to R2
+    r2.py restore mysql             Download latest.sql.gz from R2 to ./mysql/
+    r2.py restore mysql --if-empty  Only restore if local latest.sql.gz missing
+    r2.py list mysql                Show available R2 dumps
+    r2.py prune mysql --keep 7      Delete old timestamped dumps, keep N newest
 
-    data.py push <folder>             Upload local folder to R2 (overwrite)
-    data.py pull <folder>             Download R2 folder to local (overwrite)
+    r2.py push <folder>             Upload local folder to R2 (overwrite)
+    r2.py pull <folder>             Download R2 folder to local (overwrite)
 
-    data.py status                    Show all folders, handlers, and basic state
-    data.py info                      Show detected stack, container, R2 connection
+    r2.py status                    Show all folders, handlers, and basic state
+    r2.py info                      Show detected stack, container, R2 connection
 
 Or operate on any app from any directory using --app:
 
-    data.py push --app myapp env
-    data.py pull --app myapp env
-    data.py backup --app myapp mysql
-    data.py status --app myapp
+    r2.py push --app myapp env
+    r2.py pull --app myapp env
+    r2.py backup --app myapp mysql
+    r2.py status --app myapp
 
 Or use sync for general-purpose, path-explicit copies (no cwd, no app):
 
-    data.py sync r2:storage/myapp/configs/ /opt/foo/configs/    # download
-    data.py sync /opt/foo/configs/ r2:storage/myapp/configs/    # upload
-    data.py sync r2:storage/dumps/big.tar.gz /tmp/big.tar.gz    # single file
+    r2.py sync r2:storage/myapp/configs/ /opt/foo/configs/    # download
+    r2.py sync /opt/foo/configs/ r2:storage/myapp/configs/    # upload
+    r2.py sync r2:storage/dumps/big.tar.gz /tmp/big.tar.gz    # single file
 
-Conventions (no per-app config required):
-    - cwd basename = Docker Swarm stack name (e.g. "myordbok")
-    - MySQL service name = <stack>_db (e.g. "myordbok_db")
-    - R2 key layout = <bucket>/<app>/<folder>/...  (bucket comes from data.conf)
+App detection:
+    A folder under <R2_ROOT>/<bucket>/<n>/ is considered an "app" if and
+    only if <APP_DEPLOY_ROOT>/<n>/.env exists on the host. This .env is
+    created by the GitHub Actions deploy pipeline. Folders like access/,
+    store/, etc. that are NOT deployed apps are correctly excluded without
+    any hardcoded list.
 
 Credentials:
-    - R2 creds live in data.conf (one file, host-wide)
+    - R2 creds live in r2.conf (one file, host-wide)
     - MySQL creds NEVER touch the host — script execs into container and uses
       env vars already set there (DB_NAME, MYSQL_ROOT_PASSWORD, etc.)
 """
@@ -77,7 +79,7 @@ except ImportError:
 # ============================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = SCRIPT_DIR / "data.conf"
+DEFAULT_CONFIG_PATH = Path("/opt/bucket/storage/access/r2.conf")
 
 # Recognized handler folder names. Anything else falls back to plain files.
 MYSQL_FOLDERS = {"mysql", "mariadb"}
@@ -96,7 +98,7 @@ STREAM_CHUNK = 1024 * 1024  # 1 MiB
 
 @dataclass
 class Config:
-    """Parsed contents of data.conf, with env-var overrides applied."""
+    """Parsed contents of r2.conf, with env-var overrides applied."""
     account_id: str
     access_key_id: str
     secret_access_key: str
@@ -105,10 +107,11 @@ class Config:
     retention_keep: int = 7
     compression_level: int = 6
     root: str = "/opt/bucket"
+    app_deploy_root: str = "/opt"  # Where /opt/<app>/.env lives — used to detect apps
 
     @classmethod
     def load(cls, path: Path) -> "Config":
-        """Read data.conf (KEY=VALUE format), apply env var overrides."""
+        """Read r2.conf (KEY=VALUE format), apply env var overrides."""
         if not path.is_file():
             die(f"Config file not found: {path}\n"
                 f"Create it with R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, "
@@ -150,7 +153,30 @@ class Config:
             retention_keep=int(get("RETENTION_KEEP", "7") or "7"),
             compression_level=int(get("COMPRESSION_LEVEL", "6") or "6"),
             root=get("R2_ROOT", "/opt/bucket") or "/opt/bucket",
+            app_deploy_root=get("APP_DEPLOY_ROOT", "/opt") or "/opt",
         )
+
+
+# ============================================================================
+# App detection
+# ============================================================================
+#
+# A folder under R2_ROOT/<bucket>/<name>/ is considered an "app" if and only if
+# the deployment artifact at <APP_DEPLOY_ROOT>/<name>/.env exists.
+#
+# This .env file is created by the GitHub Actions deployment pipeline (see
+# deploy.yml) on every successful deploy — for SSH/Tunnel paths it's scp'd
+# to /opt/<app>/.env, and for the local VM path it's also copied there for
+# consistency. Its presence is the authoritative signal that this folder
+# represents a deployed app on this host.
+#
+# Folders like access/, store/, r2/ that are *not* deployed apps simply don't
+# have a corresponding /opt/<name>/.env, so they are correctly identified as
+# non-apps without any hardcoded list.
+
+def is_app(name: str, deploy_root: str = "/opt") -> bool:
+    """Return True if <deploy_root>/<n>/.env exists on the host."""
+    return (Path(deploy_root) / name / ".env").is_file()
 
 
 # ============================================================================
@@ -194,10 +220,12 @@ def resolve_context(config: Config, app_override: str | None = None) -> Context:
     """
     # --app override path: skip all cwd resolution, just build the context.
     if app_override:
-        if app_override == "r2":
-            die(f"--app cannot be 'r2' (the tool's own directory).")
         if "/" in app_override or ".." in app_override:
             die(f"--app must be a single name, not a path: {app_override!r}")
+        if not is_app(app_override, config.app_deploy_root):
+            marker = Path(config.app_deploy_root) / app_override / ".env"
+            die(f"--app '{app_override}' is not a deployed app on this host.\n"
+                f"  (expected marker: {marker})")
         bucket_root = Path(config.root) / config.bucket
         synthetic_cwd = bucket_root / app_override
         if not synthetic_cwd.is_dir():
@@ -277,9 +305,17 @@ def resolve_context(config: Config, app_override: str | None = None) -> Context:
     bucket_dir = parts[0]  # e.g. "storage"
     app = parts[1]         # e.g. "myordbok"
 
-    # Refuse to operate on the tool's own directory.
-    if app == "r2":
-        die(f"cwd is the tool directory ({cwd}); cd into an app folder first.")
+    # Verify this folder is actually a deployed app on this host.
+    # The marker is <APP_DEPLOY_ROOT>/<app>/.env, which is created by the
+    # GitHub Actions deployment pipeline (see deploy.yml). This naturally
+    # excludes folders like 'access/', 'store/', 'r2/' that are NOT deployed
+    # apps — no hardcoded list needed.
+    if not is_app(app, config.app_deploy_root):
+        marker = Path(config.app_deploy_root) / app / ".env"
+        die(f"'{app}' is not a deployed app on this host.\n"
+            f"  (expected marker: {marker})\n"
+            f"  If you want to operate on shared infrastructure (like access/),\n"
+            f"  use 'r2.py sync ...' with explicit paths instead.")
 
     if bucket_dir != config.bucket:
         warn(f"cwd is under '{bucket_dir}' but R2_BUCKET is '{config.bucket}'. "
@@ -952,7 +988,7 @@ def die(msg: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="data.py",
+        prog="r2.py",
         description="Cloudflare R2 backup/restore tool for Docker Swarm apps.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
