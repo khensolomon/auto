@@ -359,7 +359,9 @@ Password: changeme
 
 ### 6.2 Create a proxy host for the Django application
 
-The tunnel routes `example.com` traffic to NPM on port 80. NPM then forwards that traffic to the Django application running inside the Docker Swarm stack.
+The tunnel routes `example.com` traffic to NPM on port 80. NPM then forwards that traffic to the per-stack **nginx** service inside Docker Swarm. That nginx serves static files directly from the shared `static_volume` and proxies dynamic requests to the Django/Gunicorn `web` service. Forwarding to nginx (rather than directly to `web`) is what keeps `/static/` and `/media/` requests fast and out of Python.
+
+NPM and the stack's nginx both join the shared external `gateway` overlay network — that's the only reason they can find each other. If you ever see `502 Bad Gateway` from NPM, the most likely cause is that the stack's nginx is not on `gateway` (check `docker service inspect myordbok_nginx`).
 
 1. In NPM, go to **Hosts → Proxy Hosts → Add Proxy Host**
 2. Fill in the **Details** tab:
@@ -368,8 +370,8 @@ The tunnel routes `example.com` traffic to NPM on port 80. NPM then forwards tha
 |---|---|
 | Domain names | `example.com` |
 | Scheme | `http` |
-| Forward hostname / IP | Django swarm service name (e.g. `myordbok_web`) |
-| Forward port | Django/Gunicorn internal port (typically `8000`) |
+| Forward hostname / IP | Per-stack nginx service name (e.g. `myordbok_nginx`) |
+| Forward port | Port nginx listens on inside the container (typically `80`) |
 | Block common exploits | ✅ enabled |
 | Websockets support | enable if the app uses websockets |
 
@@ -381,7 +383,7 @@ The tunnel routes `example.com` traffic to NPM on port 80. NPM then forwards tha
 
 4. Click **Save**
 
-> To find the exact service name, run `docker service ls` on the server. The web service will appear in the `NAME` column.
+> To find the exact service name, run `docker service ls` on the server. The nginx service will appear in the `NAME` column as `<stack>_nginx`.
 
 ---
 
@@ -879,7 +881,7 @@ The `Dump Service Logs on Failure` step in the pipeline captures these automatic
 
 **Check 1:** Confirm the Cloudflare Tunnel is healthy (see above).
 
-**Check 2:** In the Cloudflare Tunnel configuration, confirm the public hostname `npm.example.com` is mapped to `http://app:81` — not `http://localhost:81`. The container hostname `app` is used because both NPM and the tunnel container share the `npm_proxy` Docker overlay network.
+**Check 2:** In the Cloudflare Tunnel configuration, confirm the public hostname `npm.example.com` is mapped to `http://localhost:81`. `localhost` is correct here because the tunnel container runs with `network_mode: host` — its `localhost` is the Docker host itself, where NPM has port 81 bound on `127.0.0.1`.
 
 **Check 3:** Confirm NPM is running:
 

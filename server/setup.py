@@ -479,20 +479,20 @@ def setup_docker(force=False, dry_run=False):
 
 def setup_docker_swarm(dry_run=False):
     """
-    Initialises Docker Swarm if not already active, then ensures all required
-    overlay networks exist. Networks must be created after Swarm is active
+    Initialises Docker Swarm if not already active, then ensures the required
+    overlay network exists. Networks must be created after Swarm is active
     because overlay networks require Swarm mode.
 
     Networks created:
-      gateway   — external network used by the application stack (docker.production.yml)
-                  to connect the nginx service to NPM. Must exist before stack deploy.
-      npm_proxy — shared network between NPM and the Cloudflare tunnel container.
-                  Created here so it is guaranteed to exist before either stack starts.
+      gateway   — the single shared network between NPM and every app stack.
+                  NPM joins it directly so it can reach each stack's public-
+                  facing service (nginx). Created here so it is guaranteed
+                  to exist before any stack deploy.
     """
     print("Checking Docker Swarm...")
     if dry_run:
         print("[DRY-RUN] Would initialise Docker Swarm if inactive.")
-        print("[DRY-RUN] Would create overlay networks: gateway, npm_proxy")
+        print("[DRY-RUN] Would create overlay network: gateway")
         return
 
     result = subprocess.run(
@@ -505,22 +505,22 @@ def setup_docker_swarm(dry_run=False):
     else:
         print("Skip: Docker Swarm is already active.")
 
-    # Create required overlay networks — idempotent, safe to re-run
-    for network in ["gateway", "npm_proxy"]:
-        check = subprocess.run(
-            ['docker', 'network', 'inspect', network],
-            capture_output=True
-        )
-        if check.returncode != 0:
-            run_cmd([
-                'docker', 'network', 'create',
-                '--driver', 'overlay',
-                '--attachable',
-                network
-            ])
-            print(f"✅ Overlay network '{network}' created.")
-        else:
-            print(f"Skip: network '{network}' already exists.")
+    # Create the shared overlay network — idempotent, safe to re-run
+    network = "gateway"
+    check = subprocess.run(
+        ['docker', 'network', 'inspect', network],
+        capture_output=True
+    )
+    if check.returncode != 0:
+        run_cmd([
+            'docker', 'network', 'create',
+            '--driver', 'overlay',
+            '--attachable',
+            network
+        ])
+        print(f"✅ Overlay network '{network}' created.")
+    else:
+        print(f"Skip: network '{network}' already exists.")
 
 
 def setup_nginx_proxy_manager(cf_token=None, force=False, dry_run=False):
@@ -536,7 +536,11 @@ def setup_nginx_proxy_manager(cf_token=None, force=False, dry_run=False):
         os.chmod(env_path, 0o600)
         print("✅ Tunnel token written to .env (600).")
 
-    # Port 81 bound to 127.0.0.1 only — not reachable from the public internet
+    # NPM joins the external 'gateway' overlay network — the same network each
+    # app stack's nginx service joins. This is the *only* place NPM and the
+    # apps can find each other on; without a shared network NPM has nothing
+    # to forward to. Port 81 (admin UI) is bound to 127.0.0.1 only — not
+    # reachable from the public internet.
     services_part = """\
   app:
     image: jc21/nginx-proxy-manager:latest
@@ -549,7 +553,7 @@ def setup_nginx_proxy_manager(cf_token=None, force=False, dry_run=False):
       - ./data:/data
       - ./letsencrypt:/etc/letsencrypt
     networks:
-      - npm_proxy"""
+      - gateway"""
 
     if cf_token:
         # network_mode: host gives the tunnel direct access to the host network.
@@ -565,15 +569,15 @@ def setup_nginx_proxy_manager(cf_token=None, force=False, dry_run=False):
     command: tunnel --no-autoupdate run
     network_mode: host"""
 
+    # 'gateway' is declared external — created by setup_docker_swarm() before
+    # this function runs. Compose will attach to it without trying to manage it.
     compose = (
         "version: '3.8'\n"
         "services:\n"
         f"{services_part}\n\n"
         "networks:\n"
-        "  npm_proxy:\n"
-        "    name: npm_proxy\n"
-        "    driver: overlay\n"
-        "    attachable: true\n"
+        "  gateway:\n"
+        "    external: true\n"
     )
 
     if dry_run:
