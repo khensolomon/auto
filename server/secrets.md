@@ -1,568 +1,374 @@
-# Secrets Management Guide
+# secrets.py
 
-**Tools:** `secrets.conf` · `secrets.py` · `gh` (GitHub CLI)
+Project-aware GitHub secrets manager.
 
-This guide covers the complete setup and ongoing management of the GitHub Actions secrets required by `deploy.yml`. All secrets are managed from a single local file and pushed to GitHub with one command.
+A single Python script that reads your project's `.env` file, validates it, and pushes the right pieces to GitHub Actions as repository secrets. No separate config file — the `.env` is the single source of truth.
 
----
-
-## Table of Contents
-
-1. [How it works](#1-how-it-works)
-2. [Prerequisites](#2-prerequisites)
-3. [First-time setup](#3-first-time-setup)
-4. [Filling in secrets.conf](#4-filling-in-secretsconf)
-5. [Pushing secrets to GitHub](#5-pushing-secrets-to-github)
-6. [Verifying the result](#6-verifying-the-result)
-7. [Day-to-day operations](#7-day-to-day-operations)
-8. [Secret reference](#8-secret-reference)
-9. [Troubleshooting](#9-troubleshooting)
+- **Source:** https://github.com/khensolomon/lets/blob/make/server/secrets.py
+- **Dependencies:** Python 3 + the GitHub CLI (`gh`)
 
 ---
 
-## 1. How it works
+## Mental model
 
-```
-secrets.conf  (local, never committed)
-     │
-     │  KEY=inline value
-     │  KEY=@~/path/to/file   ← file contents read at push time
-     │
-     ▼
-secrets.py
-     │  1. Checks gh is installed and authenticated
-     │  2. Parses and validates secrets.conf
-     │  3. Resolves @file references
-     │  4. Calls: gh secret set KEY --repo org/repo  (once per secret)
-     │            └── gh handles encryption and the GitHub API
-     ▼
-GitHub Repository Secrets
-     └── consumed by deploy.yml at workflow runtime
-```
+The `.env` file in your project is split into three zones by a single boundary line:
 
-**File references** (`@~/path/to/file`) allow secrets with large or multi-line values — SSH private keys, application `.env` files — to stay in their own files. The script reads the file at that path and passes its contents to `gh` automatically.
-
-**`gh` handles all crypto.** There is no encryption code in `secrets.py`. GitHub CLI encrypts each value with the repository's public key (libsodium sealed box) before it leaves the local machine. This is maintained by GitHub and is always up to date.
-
----
-
-## 2. Prerequisites
-
-### Install gh (GitHub CLI)
-
-`gh` is a native system package — no pip, no venv.
-
-**Ubuntu / Debian:**
-```bash
-sudo apt install gh
-```
-> If `gh` is not found, add the official GitHub repository first:
-> ```bash
-> curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
->   | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-> echo "deb [arch=$(dpkg --print-architecture) \
->   signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
->   https://cli.github.com/packages stable main" \
->   | sudo tee /etc/apt/sources.list.d/github-cli.list
-> sudo apt update && sudo apt install gh
-> ```
-
-**macOS:**
-```bash
-brew install gh
-```
-
-**Windows:**
-```bash
-winget install --id GitHub.cli
-```
-
-**All platforms:** [cli.github.com](https://cli.github.com)
-
-### Authenticate gh
-
-After installation, authenticate once. This stores credentials in the system keychain — no token management needed afterwards.
-
-```bash
-gh auth login
-```
-
-Follow the prompts:
-- Select **GitHub.com**
-- Select **HTTPS** as the preferred protocol
-- Select **Login with a web browser** (or paste a token)
-
-Verify it worked:
-```bash
-gh auth status
-```
-
-### Verify everything is ready
-
-```bash
-python3 secrets.py --check
-```
-
-Expected output:
-```
-  Checking gh CLI...
-
-  gh version  : gh version 2.x.x (...)
-  gh auth     : Logged in to github.com account <username> (...)
-```
-
----
-
-## 3. First-time setup
-
-### Create a working directory
-
-Keep all deployment-related files in one place, away from any repository:
-
-```bash
-mkdir -p ~/deploy
-cd ~/deploy
-```
-
-### Copy the files into place
-
-```bash
-cp /path/to/secrets.conf  ~/deploy/secrets.conf
-cp /path/to/secrets.py    ~/deploy/secrets.py
-chmod 600 ~/deploy/secrets.conf
-```
-
-### Add to .gitignore
-
-If the working directory is inside a repository, ensure these files are never committed:
-
-```bash
-echo "secrets.conf" >> .gitignore
-echo "*.env"        >> .gitignore
-```
-
-### Create the application .env file
-
-`deploy.yml` recreates the server `.env` on every deployment from the `ENV_FILE_CONTENT` secret. The source is a local `.env` file referenced in `secrets.conf`.
-
-Create it at the path set in `secrets.conf` (default: `~/deploy/myordbok.env`):
-
-```bash
-touch ~/deploy/myordbok.env
-chmod 600 ~/deploy/myordbok.env
-```
-
-Populate it with all variables the Django application needs at runtime:
-
-```bash
-# ~/deploy/myordbok.env
-SECRET_KEY=your-django-secret-key
+```ini
+# ZONE 1 — Production app values (pushed as ENV_FILE_CONTENT)
+SECRET_KEY=xxx
 DEBUG=False
-ALLOWED_HOSTS=myordbok.com,www.myordbok.com
 DB_NAME=myordbok
-DB_USER=myordbok_user
-DB_PASSWORD=strong-database-password
-DB_HOST=db
-DB_PORT=3306
-MYSQL_ROOT_PASSWORD=strong-root-password
-MYSQL_DATABASE=myordbok
-MYSQL_USER=myordbok_user
-MYSQL_PASSWORD=strong-database-password
-```
+DB_USER=appuser
+DB_PWD=xxx
+REPO_OWNER=khensolomon
+REPO_NAME=myordbok
+STORAGE_DIR=/opt/bucket/storage
 
----
+# NOTE: development          ← hard boundary — everything below stays local
 
-## 4. Filling in secrets.conf
+# ZONE 2 — Local dev overrides (ignored by this script)
+DEBUG=True
+DB_HOST=localhost
 
-Open `~/deploy/secrets.conf` and fill in each value. The sections below explain exactly where to get each one.
-
-### Section 1 — Server access
-
-**`SERVER_HOSTNAME`**
-
-The hostname the GitHub Actions runner connects to when deploying remotely.
-
-- For `deploy_via_tunnel`: the `ssh` subdomain configured in Cloudflare Zero Trust, e.g. `ssh.admin.com`
-- For `deploy_via_ssh`: the server's public IP address or DNS hostname
-
-```ini
+# ZONE 3 — Deployment secrets (pushed individually)
 SERVER_HOSTNAME=ssh.admin.com
-```
-
-**`SERVER_USER`**
-
-The SSH login user on the production server. Typically `root` on a fresh VPS.
-
-```ini
 SERVER_USER=root
-```
-
-**`SSH_PRIVATE_KEY`**
-
-The private key used to authenticate SSH from GitHub Actions.
-
-Generate a dedicated deploy key:
-
-```bash
-ssh-keygen -t ed25519 -C "prod-deploy" -f ~/.ssh/prod_server -N ""
-```
-
-Add the public key to the server:
-
-```bash
-ssh-copy-id -i ~/.ssh/prod_server.pub root@<server-ip>
-```
-
-Point `secrets.conf` at the private key file using the `@` file reference:
-
-```ini
-SSH_PRIVATE_KEY=@~/.ssh/prod_server
-```
-
-The `@` prefix means the file contents are read and pushed — not the path string itself.
-
----
-
-### Section 2 — GitHub runner status
-
-**`VM_RUNNER_STATUS_PAT`**
-
-Used by `check_local_vm_runner` in `deploy.yml` to poll the GitHub API and detect whether the self-hosted runner is online.
-
-**Where to create:**
-
-1. GitHub → **Settings** (account level) → **Developer settings**
-2. **Personal access tokens → Fine-grained tokens → Generate new token**
-3. Repository access: select the deployment repository
-4. Permission: **Actions → Read-only**
-5. Generate and copy the token
-
-```ini
+SSH_PRIVATE_KEY_PATH=~/.ssh/prod_server
 VM_RUNNER_STATUS_PAT=github_pat_xxxx
-```
-
----
-
-### Section 3 — Application environment
-
-**`ENV_FILE_CONTENT`**
-
-Full contents of the application `.env` file. Pushed once, recreated on the server on every deploy.
-
-```ini
-ENV_FILE_CONTENT=@~/deploy/myordbok.env
-```
-
----
-
-### Section 4 — Cloudflare tunnel authentication
-
-Used by `deploy_via_tunnel` to authenticate the GitHub-hosted runner through Cloudflare Zero Trust without port 22 being open.
-
-**Where to create:**
-
-1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Zero Trust**
-2. **Access → Service Auth → Service Tokens → Create Service Token**
-3. Name it `github-actions-deploy`
-4. Set an expiry (1 year recommended — set a calendar reminder)
-5. Copy the **Client ID** and **Client Secret**
-
-> The Client Secret is shown **once only** at creation. If lost, the token must be deleted and recreated.
-
-```ini
 CF_SERVICE_TOKEN_ID=xxxx.access
 CF_SERVICE_TOKEN_SECRET=xxxx
 ```
 
----
+The boundary is the literal comment line `# NOTE: development`. Above it is what gets shipped to production. Below it is your local-only stuff.
 
-## 5. Pushing secrets to GitHub
+What the script does with each zone:
 
-### Validate first (dry-run)
+| Zone | Pushed how | GitHub secret name |
+|------|-----------|---------------------|
+| Zone 1 (everything above the boundary) | All lines concatenated, pushed as one bundle | `ENV_FILE_CONTENT` |
+| Zone 2 (right after boundary, before deploy keys) | Ignored — your local dev overrides | — |
+| Zone 3 (the recognised deploy keys) | Each pushed as its own GitHub secret | `SERVER_HOSTNAME`, `SERVER_USER`, etc. |
 
-Always validate before pushing to catch missing files, unfilled placeholders, or format errors:
+Only specific keys in Zone 3 are pushed. The recognised set is:
 
-```bash
-cd ~/deploy
-python3 secrets.py --config secrets.conf --repo org/reponame --dry-run
-```
+- `SERVER_HOSTNAME`
+- `SERVER_USER`
+- `VM_RUNNER_STATUS_PAT`
+- `CF_SERVICE_TOKEN_ID`
+- `CF_SERVICE_TOKEN_SECRET`
+- `SSH_PRIVATE_KEY_PATH` — special: the value is treated as a file path, the file is read, and **its contents** are pushed as `SSH_PRIVATE_KEY` (not the path itself).
 
-Expected output:
+Anything else you put in Zone 3 is silently ignored. Add it to the `DEPLOY_KEYS` set in `secrets.py` if you want a new deploy key recognised.
 
-```
-SECRET                    VALUE PREVIEW              ACTION
-------------------------  -------------------------  ----------
-CF_SERVICE_TOKEN_ID       xxxx.ac******************  would push
-CF_SERVICE_TOKEN_SECRET   xxxxxx****************     would push
-ENV_FILE_CONTENT          [42 lines]                 would push
-SERVER_HOSTNAME           ssh.admin.com              would push
-SERVER_USER               root                       would push
-SSH_PRIVATE_KEY           [38 lines]                 would push
-VM_RUNNER_STATUS_PAT      github_p******************  would push
-
-  Dry-run complete. 7 secret(s) validated. Nothing was pushed.
-```
-
-### Push all secrets
-
-```bash
-python3 secrets.py --config secrets.conf --repo org/reponame
-```
-
-Expected output:
-
-```
-  Repository : org/reponame
-  Secrets    : 7
-
-SECRET                    VALUE PREVIEW              RESULT
-------------------------  -------------------------  ----------
-CF_SERVICE_TOKEN_ID       xxxx.ac******************  OK  pushed
-CF_SERVICE_TOKEN_SECRET   xxxxxx****************     OK  pushed
-ENV_FILE_CONTENT          [42 lines]                 OK  pushed
-SERVER_HOSTNAME           ssh.admin.com              OK  pushed
-SERVER_USER               root                       OK  pushed
-SSH_PRIVATE_KEY           [38 lines]                 OK  pushed
-VM_RUNNER_STATUS_PAT      github_p******************  OK  pushed
-
-  Total : 7  |  Success : 7  |  Failed : 0
-
-  All 7 secret(s) pushed successfully.
-```
+`REPO_OWNER` and `REPO_NAME` must exist in Zone 1. They identify the GitHub repo to push to. The script aborts immediately if either is missing.
 
 ---
 
-## 6. Verifying the result
+## Install
 
-### Via secrets.py
-
-```bash
-python3 secrets.py --config secrets.conf --repo org/reponame --list
-```
-
-Calls `gh secret list` and prints all secret names currently set on the repository. Values are never shown — only names.
-
-### Via the GitHub UI
-
-1. Repository → **Settings → Secrets and variables → Actions**
-2. All 7 secret names should appear in the list
-
-Secrets cannot be read back — only names are visible. This is expected.
-
-### Via a test deployment
-
-Trigger a deployment and confirm all jobs complete without authentication errors:
+### 1. Install the GitHub CLI
 
 ```bash
-git commit --allow-empty -m "deploy: test secrets configuration"
-git push origin master
-```
-
-Watch the run under **Actions** in the repository.
-
----
-
-## 7. Day-to-day operations
-
-### Rotate a single secret
-
-Edit the value in `secrets.conf` (or update the referenced file), then push only that secret:
-
-```bash
-python3 secrets.py --config secrets.conf --repo org/reponame --only CF_SERVICE_TOKEN_SECRET
-```
-
-### Update the application .env
-
-Edit `~/deploy/myordbok.env`, then push:
-
-```bash
-python3 secrets.py --config secrets.conf --repo org/reponame --only ENV_FILE_CONTENT
-```
-
-The new value takes effect on the next deployment run.
-
-### Rotate the SSH key
-
-```bash
-# 1. Generate a new key
-ssh-keygen -t ed25519 -C "prod-deploy-rotated" -f ~/.ssh/prod_server_new -N ""
-
-# 2. Add to the server (keep the old key active during transition)
-ssh-copy-id -i ~/.ssh/prod_server_new.pub root@<server-hostname>
-
-# 3. Update secrets.conf to point at the new key
-#    SSH_PRIVATE_KEY=@~/.ssh/prod_server_new
-
-# 4. Push the updated key
-python3 secrets.py --config secrets.conf --repo org/reponame --only SSH_PRIVATE_KEY
-
-# 5. Test a deployment — confirm it works with the new key
-# 6. Remove the old key from the server's authorized_keys
-```
-
-### Renew an expired Cloudflare Service Token
-
-1. Cloudflare → **Zero Trust → Access → Service Auth → Service Tokens**
-2. Delete the expired `github-actions-deploy` token
-3. Create a new one with the same name
-4. Update `secrets.conf` with the new ID and secret
-5. Push both:
-
-```bash
-python3 secrets.py --config secrets.conf --repo org/reponame --only CF_SERVICE_TOKEN_ID
-python3 secrets.py --config secrets.conf --repo org/reponame --only CF_SERVICE_TOKEN_SECRET
-```
-
-### Add a new secret
-
-1. Add the new `KEY=value` line to `secrets.conf`
-2. Run a dry-run to validate
-3. Push all (re-pushing existing secrets is safe — they are updated, not duplicated):
-
-```bash
-python3 secrets.py --config secrets.conf --repo org/reponame
-```
-
-### Re-authenticate gh after credential expiry
-
-```bash
-gh auth refresh
-# or start fresh
-gh auth login
-```
-
----
-
-## 8. Secret reference
-
-Full reference of every secret consumed by `deploy.yml`.
-
-| Secret | Section in conf | Used by | Notes |
-|---|---|---|---|
-| `ENV_FILE_CONTENT` | Section 3 | All deploy paths | Full app `.env` — recreated on server each deploy |
-| `SSH_PRIVATE_KEY` | Section 1 | `deploy_via_tunnel`, `deploy_via_ssh` | Ed25519 private key |
-| `SERVER_HOSTNAME` | Section 1 | `deploy_via_tunnel`, `deploy_via_ssh` | Tunnel hostname or server IP |
-| `SERVER_USER` | Section 1 | `deploy_via_tunnel`, `deploy_via_ssh` | SSH login user |
-| `VM_RUNNER_STATUS_PAT` | Section 2 | `check_local_vm_runner` | PAT with Actions read-only scope |
-| `CF_SERVICE_TOKEN_ID` | Section 4 | `deploy_via_tunnel` | Cloudflare service token Client ID |
-| `CF_SERVICE_TOKEN_SECRET` | Section 4 | `deploy_via_tunnel` | Cloudflare service token Client Secret |
-| `GITHUB_TOKEN` | — | Build phase | Auto-provided by GitHub Actions — never push manually |
-
-### GitHub environments
-
-`deploy_via_tunnel` and `deploy_via_ssh` are scoped to named GitHub environments. Create these before the first deployment:
-
-**Repository → Settings → Environments → New environment**
-
-| Environment name | Used by |
-|---|---|
-| `production-tunnel` | `deploy_via_tunnel` |
-| `production-ssh` | `deploy_via_ssh` |
-
-Environments support additional deployment gates — required reviewers, wait timers, and environment-scoped secrets.
-
----
-
-## 9. Troubleshooting
-
-### `gh is not installed or not on PATH`
-
-Install `gh` for the current platform and re-run `python3 secrets.py --check`:
-
-```bash
-# Ubuntu/Debian
-sudo apt install gh
-
 # macOS
 brew install gh
 
-# Windows
-winget install --id GitHub.cli
+# Debian / Ubuntu
+sudo apt install gh
+
+# Other systems
+# https://github.com/cli/cli#installation
 ```
 
----
-
-### `gh is installed but not authenticated`
-
-Run the one-time login:
+### 2. Authenticate
 
 ```bash
 gh auth login
 ```
 
-Then verify:
+The script needs `gh` to be authenticated with `repo` scope so it can read and write Actions secrets.
+
+### 3. Download the script
 
 ```bash
-gh auth status
+sudo wget https://raw.githubusercontent.com/khensolomon/lets/make/server/secrets.py -O /usr/local/bin/secrets.py
+sudo chmod +x /usr/local/bin/secrets.py
+```
+
+Or just keep it inside your project — it doesn't matter where it lives.
+
+### 4. Verify
+
+```bash
+cd ~/projects/myordbok
+secrets.py --check
+```
+
+Should report that `gh` is authenticated, you're inside a git repo, and your `.env` parses cleanly.
+
+---
+
+## Updating
+
+Same command as install — the script is one self-contained file:
+
+```bash
+sudo wget https://raw.githubusercontent.com/khensolomon/lets/make/server/secrets.py -O /usr/local/bin/secrets.py
+```
+
+Your `.env` is never touched.
+
+---
+
+## Setting up a new project
+
+If your `.env` doesn't yet have a deployment section, scaffold one:
+
+```bash
+cd ~/projects/myordbok
+secrets.py --init
+```
+
+This appends the `# NOTE: development` boundary and a blank Zone 3 template to your `.env`. Edit the placeholders, then run `--push`.
+
+---
+
+## Commands
+
+The script's default action — running `secrets.py` with no flags — shows an overview of your project: which keys are in Zone 1, which deploy secrets exist, what's on GitHub already. Nothing is pushed. This is the safe "what's the state of things" command.
+
+### `--push`
+
+The main verb. Reads `.env`, builds the Zone 1 bundle, pushes everything to GitHub.
+
+```bash
+secrets.py --push                       # push everything
+secrets.py --push --only DB_PWD         # push one secret (partial match ok)
+secrets.py --push --dry-run             # validate + preview, no actual push
+secrets.py --push --force               # push all, skip stale detection
+```
+
+Stale detection: by default, if a secret on GitHub is newer than the corresponding line in your local `.env`, the script warns you instead of overwriting. `--force` bypasses this. Use it when you know your local `.env` is the truth and the GitHub side is what needs updating.
+
+`--only` accepts a partial name. `--push --only db` would match `DB_PWD`, `DB_USER`, `DB_NAME`, etc. The script prints what it matched before pushing.
+
+### `--status`
+
+Side-by-side comparison of local `.env` vs GitHub. Marks each secret as **synced**, **stale**, **missing locally**, or **missing on GitHub**.
+
+```bash
+secrets.py --status
+```
+
+Useful before a push to see what would actually change.
+
+### `--diff`
+
+Shows what changed in your `.env` since the last backup. Backups are created automatically on every `--push`.
+
+```bash
+secrets.py --diff
+```
+
+If no backup exists yet, the diff is "everything is new."
+
+### `--env-preview`
+
+Prints exactly what would be pushed as `ENV_FILE_CONTENT` — the cleaned Zone 1 bundle, with comments and dev-zone lines stripped.
+
+```bash
+secrets.py --env-preview
+```
+
+This is what `printf "%s" "${{ secrets.ENV_FILE_CONTENT }}" > .env` reconstructs on the production server. Reading this is the fastest way to confirm your zones are split correctly.
+
+### `--list`
+
+Lists all secret names currently on GitHub for this repo.
+
+```bash
+secrets.py --list
+```
+
+### `--restore`
+
+Restores `.env` from a previous backup. Interactive — picks the backup from a numbered list.
+
+```bash
+secrets.py --restore
+```
+
+The current `.env` is itself backed up before being overwritten, so this operation is reversible.
+
+### `--rotate`
+
+Guided SSH key rotation:
+
+1. Generates a new keypair
+2. Walks you through adding the public key to the server's `authorized_keys`
+3. Tests the new key
+4. Updates `SSH_PRIVATE_KEY_PATH` in your `.env`
+5. Pushes the new private key as the `SSH_PRIVATE_KEY` GitHub secret
+6. Optionally removes the old public key from the server
+
+```bash
+secrets.py --rotate
+```
+
+Read the prompts carefully — the script tells you exactly what it's about to do at each step and asks for confirmation.
+
+### `--check`
+
+Diagnostic. Validates that `gh` is authenticated, you're in a git repo, the `.env` exists and parses, the boundary line is present, and `REPO_OWNER`/`REPO_NAME` are set. Run this first if anything feels broken.
+
+```bash
+secrets.py --check
+```
+
+### `--init`
+
+Scaffolds a deployment section in `.env` if one doesn't exist. Appends the `# NOTE: development` boundary and a Zone 3 template with placeholders. Idempotent — won't duplicate if the boundary is already present.
+
+```bash
+secrets.py --init
 ```
 
 ---
 
-### `REPLACE_ME placeholder` error
+## Flags
 
-A value in `secrets.conf` still has the default placeholder. Open the file, find the key listed in the error, and replace the value with the real one. Then re-run `--dry-run` to confirm.
+### Global flags
+
+| Flag | Effect |
+|------|--------|
+| `--env FILE` | Use this `.env` instead of the one in the project root |
+| `--repo ORG/REPO` | Override `REPO_OWNER`/`REPO_NAME` detection from the `.env` |
+| `-h` / `--help` | Show help |
+
+### Per-command flags
+
+| Flag | Available on | Effect |
+|------|--------------|--------|
+| `--only KEY` | `--push` | Only push secrets whose name matches (partial match) |
+| `--dry-run` | `--push` | Validate and show what would happen, push nothing |
+| `--force` | `--push` | Skip stale detection — local always wins |
 
 ---
 
-### `file reference not found`
+## Backup location
 
-The path after `@` does not exist on the local machine. Verify the file exists at the expected path:
+Every successful `--push` creates a timestamped backup of your `.env`:
 
-```bash
-ls -la ~/deploy/myordbok.env
-ls -la ~/.ssh/prod_server
+```
+$STORAGE_DIR/<repo-name>/env/env-YYYY-MM-DD_HH-MM-SS.env
 ```
 
-Ensure the `~` in the path expands correctly for the current user.
+`STORAGE_DIR` is read from Zone 1 of your `.env`. If it's not set, backups go to `~/.deploy/backups/<repo-name>/` instead.
+
+Old backups are pruned automatically — the script keeps the last several and removes anything older.
 
 ---
 
-### `ERR` row in the results table
+## Typical workflows
 
-`gh secret set` returned a non-zero exit code for that secret. Common causes:
-
-- The `--repo` argument does not match the repository exactly (case-sensitive).
-- The authenticated `gh` account does not have write access to the repository.
-- The repository does not exist or has been renamed.
-
-Run `gh auth status` to confirm the correct account is active, and `gh repo view org/reponame` to confirm repository access.
-
----
-
-### Secret pushed but deploy still fails with auth error
-
-GitHub Actions caches secrets for the duration of a run. A secret updated mid-run is not visible until the next run. Re-trigger the deployment after pushing.
-
-If the issue persists, confirm the secret name in `secrets.conf` exactly matches the name referenced in `deploy.yml` — secret names are case-sensitive.
-
----
-
-### `deploy_via_tunnel` fails — authentication error at SSH step
-
-The Cloudflare Service Token has likely expired. Check at:
-
-**Cloudflare → Zero Trust → Access → Service Auth → Service Tokens**
-
-If expired, follow the renewal procedure in Section 7.
-
----
-
-### Re-running secrets.py on a new machine
-
-`secrets.py` and `secrets.conf` are the only files needed. On the new machine:
+### Initial setup of a project
 
 ```bash
-# 1. Install gh
-sudo apt install gh          # or brew / winget
-
-# 2. Authenticate
-gh auth login
-
-# 3. Copy secrets.conf and referenced files to the new machine
-#    (e.g. ~/.ssh/prod_server, ~/deploy/myordbok.env)
-
-# 4. Verify
-python3 secrets.py --check
-python3 secrets.py --config secrets.conf --repo org/reponame --dry-run
+cd ~/projects/myordbok
+secrets.py --check                   # confirm environment is healthy
+secrets.py --init                    # scaffold deployment section if missing
+$EDITOR .env                         # fill in the Zone 3 placeholders
+secrets.py --push --dry-run          # see what would happen
+secrets.py --push                    # actually push
 ```
+
+### Day-to-day: rotating a single value
+
+You changed `DB_PWD` locally and want it on GitHub:
+
+```bash
+secrets.py --status                  # confirm DB_PWD shows as 'stale on GitHub'
+secrets.py --push --only DB_PWD
+```
+
+### Day-to-day: rotating SSH keys
+
+```bash
+secrets.py --rotate
+```
+
+Walk through the prompts. The new key is pushed and the old one is optionally removed from the server.
+
+### Recovering from a bad edit
+
+You broke your `.env` and want to roll back to the last good version:
+
+```bash
+secrets.py --restore
+```
+
+Pick the backup from the list. Your current (broken) `.env` is itself backed up first, so nothing is lost.
+
+### Switching between projects
+
+The script auto-detects the project from `cwd`. To operate on a different project's secrets without changing directories:
+
+```bash
+secrets.py --env ~/projects/otherproject/.env --status
+```
+
+Or override the repo identity:
+
+```bash
+secrets.py --repo myorg/otherrepo --status
+```
+
+---
+
+## Conventions and assumptions
+
+- **Zone boundary = the literal comment `# NOTE: development`.** No alternate spellings, no flexibility. The script does a string match for that line.
+- **Repo identity = `REPO_OWNER/REPO_NAME` from Zone 1.** Both must exist or the script aborts.
+- **Recognised deploy keys are hardcoded.** See the `DEPLOY_KEYS` set near the top of `secrets.py` to see/add to the list.
+- **`SSH_PRIVATE_KEY_PATH` → `SSH_PRIVATE_KEY`.** The path is for your local convenience; the file's contents become the actual GitHub secret named `SSH_PRIVATE_KEY`.
+- **`GITHUB_TOKEN` is never pushed.** It's auto-provided to every Actions workflow by GitHub itself.
+- **Backups are always written before any destructive operation.** Push, init, rotate, restore — they all back up first.
+
+---
+
+## Troubleshooting
+
+**`error: gh CLI not authenticated.`**
+Run `gh auth login` and follow the browser prompt.
+
+**`error: Not inside a git repository.`**
+The script needs to be run from inside a project. `cd` into it first or pass `--env` explicitly.
+
+**`error: REPO_OWNER and REPO_NAME must both be set in Zone 1.`**
+Open `.env`, add the two lines above the `# NOTE: development` boundary:
+```ini
+REPO_OWNER=yourorg
+REPO_NAME=yourrepo
+```
+
+**`error: zone boundary '# NOTE: development' not found in .env`**
+The `.env` is missing the divider. Run `secrets.py --init` to add it (appends below your existing content) or add it manually.
+
+**`warning: SSH_PRIVATE_KEY_PATH points to a file that doesn't exist.`**
+The path in your `.env` is wrong, or you're on a different machine than the one with the key. Fix the path or generate a new key with `secrets.py --rotate`.
+
+**`warning: secret on GitHub is newer than local — refusing to overwrite.`**
+Stale detection caught a possible regression. Either pull the latest `.env` from your real source of truth, or pass `--force` if you're sure the local version is correct.
+
+**`error: matched no secrets with --only <pattern>`**
+The partial match found nothing. Run `secrets.py --status` to see the exact key names available.
+
+---
+
+## Security notes
+
+- The `.env` file should be `chmod 600`. The script warns if it isn't.
+- The `.env` should be in `.gitignore`. The script warns if it isn't.
+- Backups are written to `STORAGE_DIR` (or `~/.deploy/backups/`) — make sure that location is also outside any git tree.
+- `gh` stores its auth token in your OS keychain (macOS) or in a dotfile under `~/.config/gh/` (Linux). Treat that file the same way you treat `.env`.
+- Pushed secrets are encrypted at rest by GitHub. They're decrypted only inside running Actions workflows and are never visible in the GitHub web UI after creation — even to repo admins.
+- `SSH_PRIVATE_KEY` deserves the same care as any production credential. Rotate with `secrets.py --rotate` rather than editing by hand.
