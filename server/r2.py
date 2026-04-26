@@ -486,6 +486,14 @@ def mysql_dump_to_file(container: str, db_name: str, dest: Path,
       1. root with no password (works when MYSQL_ALLOW_EMPTY_PASSWORD=yes)
       2. root with $MYSQL_ROOT_PASSWORD inside container
       3. root with $DB_ROOT_PWD inside container
+
+    NOTE: strategies 2 and 3 only succeed if the corresponding env var is
+    actually set inside the *db* container's environment. The default
+    docker.production.yml sets MYSQL_ROOT_PASSWORD/DB_ROOT_PWD on the *web*
+    service only, not on db, so in that configuration only strategy 1 works
+    (which is fine — MYSQL_ALLOW_EMPTY_PASSWORD=yes makes it succeed). If
+    you ever switch root to a real password, also pass the password env var
+    through to the db service or strategies 2/3 will silently no-op.
     """
     base_args = [
         "--single-transaction",  # consistent snapshot without locking
@@ -600,7 +608,7 @@ def cmd_backup_mysql(ctx: Context, args, s3) -> None:
                    f"{prefix}latest.sql.gz", dry=False)
 
     say(f"\nbackup complete. Local copies kept in {local_dir}")
-    say(f"(run 'data.py prune {folder}' to clean up old timestamped dumps)")
+    say(f"(run 'r2.py prune {folder}' to clean up old timestamped dumps)")
 
 
 def cmd_restore_mysql(ctx: Context, args, s3) -> None:
@@ -624,7 +632,7 @@ def cmd_restore_mysql(ctx: Context, args, s3) -> None:
                 say(f"No remote {key} found; --if-empty set, nothing to restore. (OK for first deploy.)")
                 return
             die(f"Remote object not found: s3://{ctx.config.bucket}/{key}\n"
-                f"Has a backup ever been uploaded? Try: data.py list {folder}")
+                f"Has a backup ever been uploaded? Try: r2.py list {folder}")
         die(f"R2 head_object failed: {e}")
 
     r2_download_file(s3, ctx.config.bucket, key, local_latest, dry=args.dry_run)
@@ -1043,9 +1051,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "General-purpose copy between local and R2.\n\n"
             "Examples:\n"
-            "  data.py sync r2:storage/myapp/configs/ /opt/foo/configs/\n"
-            "  data.py sync /opt/foo/configs/ r2:storage/myapp/configs/\n"
-            "  data.py sync r2:storage/dumps/file.tar.gz /tmp/file.tar.gz\n\n"
+            "  r2.py sync r2:storage/myapp/configs/ /opt/foo/configs/\n"
+            "  r2.py sync /opt/foo/configs/ r2:storage/myapp/configs/\n"
+            "  r2.py sync r2:storage/dumps/file.tar.gz /tmp/file.tar.gz\n\n"
             "Trailing slashes are decoration. Always overwrites the target."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
