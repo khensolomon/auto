@@ -10,7 +10,7 @@ HOW THE .env IS STRUCTURED
   # ZONE 1 — Production app values (pushed as ENV_FILE_CONTENT)
   SECRET_KEY=xxx
   DEBUG=False
-  STORAGE_DIR=/opt/bucket/storage
+  STORAGE_ROOT=/opt/bucket/storage
 
   # NOTE: development          ← hard boundary — everything below stays local
 
@@ -28,9 +28,9 @@ HOW THE .env IS STRUCTURED
 ─────────────────────────────────────────────────────────────────────────────
 
 BACKUP LOCATION
-  STORAGE_DIR (from Zone 1) + repo-name + /env/
+  STORAGE_ROOT (from Zone 1) + repo-name + /env/
   e.g. /opt/bucket/storage/repo-one/env/env-2026-04-22_14-30-00.env
-  Fallback: ~/.deploy/backups/<repo-name>/ if STORAGE_DIR is not set.
+  Fallback: ~/.deploy/backups/<repo-name>/ if STORAGE_ROOT is not set.
 
 USAGE
   python3 secrets.py               Project overview — safe default, nothing pushed
@@ -326,7 +326,7 @@ def parse_env_file(env_path: Path) -> dict:
     Returns:
         zone1        {KEY: VALUE}  — production app values (above marker)
         zone3        {KEY: VALUE}  — known deployment keys (below marker)
-        storage_dir  str | None    — STORAGE_DIR from Zone 1
+        storage_root  str | None    — STORAGE_ROOT from Zone 1
         raw_zone1    str           — cleaned Zone 1 text for ENV_FILE_CONTENT
     """
     if not env_path.exists():
@@ -396,7 +396,7 @@ def parse_env_file(env_path: Path) -> dict:
     return {
         "zone1":       zone1,
         "zone3":       zone3_raw,
-        "storage_dir": zone1.get("STORAGE_DIR"),
+        "storage_root": zone1.get("STORAGE_ROOT"),
         "raw_zone1":   "\n".join(zone1_lines) + "\n",
     }
 
@@ -468,15 +468,15 @@ def resolve_secrets(env_data: dict) -> dict:
 # BACKUP SYSTEM
 # ==============================================================================
 
-def resolve_backup_dir(storage_dir: str | None, repo_slug: str) -> Path:
+def resolve_backup_dir(storage_root: str | None, repo_slug: str) -> Path:
     """
     Derive the backup directory:
-      Primary  : STORAGE_DIR / repo-slug / env
+      Primary  : STORAGE_ROOT / repo-slug / env
       Fallback : ~/.deploy/backups / repo-slug
     Aborts if neither can be created.
     """
-    if storage_dir:
-        backup_dir = Path(storage_dir) / repo_slug / "env"
+    if storage_root:
+        backup_dir = Path(storage_root) / repo_slug / "env"
     else:
         backup_dir = Path.home() / ".deploy" / "backups" / repo_slug
 
@@ -486,7 +486,7 @@ def resolve_backup_dir(storage_dir: str | None, repo_slug: str) -> Path:
     except PermissionError:
         abort(
             f"Permission denied creating backup directory: {backup_dir}",
-            "Check that STORAGE_DIR in .env points to a writable location."
+            "Check that STORAGE_ROOT in .env points to a writable location."
         )
     except OSError as e:
         abort(f"Cannot create backup directory: {backup_dir}", str(e))
@@ -707,11 +707,11 @@ def cmd_check(args, git_root: Path, env_path: Path) -> None:
         )
     print(f"  repository   : {repo}")
 
-    storage = env_data["storage_dir"]
+    storage = env_data["storage_root"]
     if storage:
-        print(f"  STORAGE_DIR  : {storage}")
+        print(f"  STORAGE_ROOT  : {storage}")
     else:
-        print(f"  STORAGE_DIR  : not set — fallback: {Path.home() / '.deploy' / 'backups'}")
+        print(f"  STORAGE_ROOT  : not set — fallback: {Path.home() / '.deploy' / 'backups'}")
 
     zone3        = env_data["zone3"]
     all_keys     = sorted(DEPLOY_KEYS | {SSH_KEY_PATH_KEY})
@@ -1273,15 +1273,15 @@ def main():
     repo = args.repo or f"{_owner}/{_name}"
 
     # ── Resolve backup directory ──────────────────────────────────────────────
-    storage_dir = env_data["storage_dir"]
-    if not storage_dir:
+    storage_root = env_data["storage_root"]
+    if not storage_root:
         fallback = Path.home() / ".deploy" / "backups"
         print(
-            f"\n  NOTE: STORAGE_DIR not set in .env.\n"
+            f"\n  NOTE: STORAGE_ROOT not set in .env.\n"
             f"  Backups will be saved to: {fallback}\n"
         )
     repo_slug  = repo.split("/")[-1]
-    backup_dir = resolve_backup_dir(storage_dir, repo_slug)
+    backup_dir = resolve_backup_dir(storage_root, repo_slug)
 
     # ── Command dispatch ──────────────────────────────────────────────────────
     if args.push:

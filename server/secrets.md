@@ -22,7 +22,7 @@ DB_USER=appuser
 DB_PWD=xxx
 REPO_OWNER=khensolomon
 REPO_NAME=myordbok
-STORAGE_DIR=/opt/bucket/storage
+STORAGE_ROOT=/opt/bucket/storage
 
 # NOTE: development          ← hard boundary — everything below stays local
 
@@ -259,10 +259,10 @@ secrets.py --init
 Every successful `--push` creates a timestamped backup of your `.env`:
 
 ```
-$STORAGE_DIR/<repo-name>/env/env-YYYY-MM-DD_HH-MM-SS.env
+$STORAGE_ROOT/<repo-name>/env/env-YYYY-MM-DD_HH-MM-SS.env
 ```
 
-`STORAGE_DIR` is read from Zone 1 of your `.env`. If it's not set, backups go to `~/.deploy/backups/<repo-name>/` instead.
+`STORAGE_ROOT` is read from Zone 1 of your `.env`. If it's not set, backups go to `~/.deploy/backups/<repo-name>/` instead.
 
 Old backups are pruned automatically — the script keeps the last several and removes anything older.
 
@@ -368,7 +368,7 @@ The partial match found nothing. Run `secrets.py --status` to see the exact key 
 
 - The `.env` file should be `chmod 600`. The script warns if it isn't.
 - The `.env` should be in `.gitignore`. The script warns if it isn't.
-- Backups are written to `STORAGE_DIR` (or `~/.deploy/backups/`) — make sure that location is also outside any git tree.
+- Backups are written to `STORAGE_ROOT` (or `~/.deploy/backups/`) — make sure that location is also outside any git tree.
 - `gh` stores its auth token in your OS keychain (macOS) or in a dotfile under `~/.config/gh/` (Linux). Treat that file the same way you treat `.env`.
 - Pushed secrets are encrypted at rest by GitHub. They're decrypted only inside running Actions workflows and are never visible in the GitHub web UI after creation — even to repo admins.
 - `SSH_PRIVATE_KEY` deserves the same care as any production credential. Rotate with `secrets.py --rotate` rather than editing by hand.
